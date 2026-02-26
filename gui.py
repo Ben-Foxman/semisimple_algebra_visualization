@@ -45,12 +45,11 @@ except Exception:
         ExtendedSelection=QtWidgets.QAbstractItemView.ExtendedSelection,
     )
 
-from algebras import (
-    PartitionAlgebra,
-    BrauerAlgebra,
-    WalledBrauerAlgebra,
-    SymmetricGroupAlgebra,
-)
+
+from algebras.partition import PartitionAlgebra
+from algebras.brauer import BrauerAlgebra
+from algebras.walled_brauer import WalledBrauerAlgebra
+from algebras.symmetric import SymmetricGroupAlgebra
 
 
 class DiagramRenderer:
@@ -1448,7 +1447,7 @@ class AlgebraGui(QtWidgets.QMainWindow):
             for j in range(n):
                 item = QtWidgets.QTableWidgetItem(format_expr(mat[order[i], order[j]]))
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                item.setForeground(QtGui.QBrush(QtGui.QColor("white")))
+                item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
                 self.matrix_table.setItem(i, j, item)
         norm_sq = sympy.simplify(
             sum(mat[i, j] * mat[i, j] for i in range(n) for j in range(n))
