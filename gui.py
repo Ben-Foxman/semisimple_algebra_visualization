@@ -363,6 +363,20 @@ def _irrep_label(irrep):
     return _partition_label(irrep)
 
 
+def _path_lex_key(path):
+    def _node_label(node):
+        if isinstance(node, tuple) and len(node) == 2:
+            if isinstance(node[1], int):
+                node = node[0]
+            elif isinstance(node[0], tuple) and isinstance(node[1], tuple):
+                return f"{_partition_label(node[0])}|{_partition_label(node[1])}"
+        if isinstance(node, list):
+            node = tuple(node)
+        return _partition_label(node)
+
+    return "->".join(_node_label(step) for step in reversed(path))
+
+
 def render_young_diagram(part, cell=12, pad=4):
     rows = list(part)
     if not rows:
@@ -680,7 +694,9 @@ class AlgebraGui(QtWidgets.QMainWindow):
         controls.addWidget(self.irrep_selector)
 
         self.element_selector = QtWidgets.QComboBox()
-        self.element_selector.addItems(["generators", "basis labels"])
+        self.element_selector.addItems(
+            ["generators", "all basis elements", "dual basis"]
+        )
         controls.addWidget(QtWidgets.QLabel("Elements:"))
         controls.addWidget(self.element_selector)
 
@@ -698,6 +714,9 @@ class AlgebraGui(QtWidgets.QMainWindow):
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
         self.matrix_group_layout.addWidget(self.matrix_table)
+
+        self.matrix_norm_label = QtWidgets.QLabel("Frobenius norm: ")
+        self.matrix_group_layout.addWidget(self.matrix_norm_label)
 
         self.irrep_scroll = QtWidgets.QScrollArea()
         self.irrep_scroll.setWidgetResizable(True)
@@ -1332,6 +1351,14 @@ class AlgebraGui(QtWidgets.QMainWindow):
         if self.algebra is None:
             return []
         mode = self.element_selector.currentText()
+        if mode == "dual basis":
+            try:
+                mats = self.algebra.irrep_matrices
+                if not mats:
+                    return []
+                return [f"{label}*" for label in sorted(mats[0].keys())]
+            except Exception:
+                return []
         if mode == "generators":
             try:
                 mats = self.algebra.irrep_matrices
@@ -1340,7 +1367,29 @@ class AlgebraGui(QtWidgets.QMainWindow):
                 return sorted(mats[0].keys())
             except Exception:
                 return []
-        return [self.algebra.label_of(b) for b in self.algebra.basis]
+        labels = [self.algebra.label_of(b) for b in self.algebra.basis]
+        if mode == "dual basis":
+            return [f"{label}*" for label in labels]
+        return labels
+
+    def _dual_irrep_matrix_for_label(self, irrep_idx, label):
+        alg = self.algebra
+        if alg is None:
+            return None
+        labels = [alg.label_of(b) for b in alg.basis]
+        base_label = label[:-1] if label.endswith("*") else label
+        try:
+            basis_idx = labels.index(base_label)
+        except ValueError:
+            return None
+        coeffs = alg.dual_basis[basis_idx]
+        d_rho = len(alg.bratteli_paths[irrep_idx])
+        mat = sympy.zeros(d_rho, d_rho)
+        for j_idx, coeff in coeffs.items():
+            if coeff == 0:
+                continue
+            mat += coeff * alg.irrep_matrix_for_label(irrep_idx, labels[j_idx])
+        return mat
 
     def _refresh_matrix_list(self):
         self.element_list.clear()
@@ -1375,23 +1424,37 @@ class AlgebraGui(QtWidgets.QMainWindow):
             return
         try:
             irrep_idx = self.irrep_selector.currentIndex()
-            mat = self.algebra.irrep_matrix_for_label(irrep_idx, label)
+            mode = self.element_selector.currentText()
+            if mode == "dual basis":
+                mat = self._dual_irrep_matrix_for_label(irrep_idx, label)
+                if mat is None:
+                    raise ValueError("Unknown dual basis element.")
+            else:
+                mat = self.algebra.irrep_matrix_for_label(irrep_idx, label)
         except Exception:
             self.matrix_table.clear()
             self.matrix_table.setRowCount(0)
             self.matrix_table.setColumnCount(0)
+            self.matrix_norm_label.setText("Frobenius norm: ")
             return
 
         n = mat.rows
+        paths = self.algebra.bratteli_paths[irrep_idx]
+        order = sorted(range(n), key=lambda idx: _path_lex_key(paths[idx]))
         self.matrix_table.clear()
         self.matrix_table.setRowCount(n)
         self.matrix_table.setColumnCount(n)
         for i in range(n):
             for j in range(n):
-                item = QtWidgets.QTableWidgetItem(format_expr(mat[i, j]))
+                item = QtWidgets.QTableWidgetItem(format_expr(mat[order[i], order[j]]))
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+                item.setForeground(QtGui.QBrush(QtGui.QColor("white")))
                 self.matrix_table.setItem(i, j, item)
+        norm_sq = sympy.simplify(
+            sum(mat[i, j] * mat[i, j] for i in range(n) for j in range(n))
+        )
+        norm_text = format_expr(sympy.sqrt(norm_sq))
+        self.matrix_norm_label.setText(f"Frobenius norm: {norm_text}")
         self.matrix_table.resizeColumnsToContents()
         self.matrix_table.resizeRowsToContents()
         table_width = (
