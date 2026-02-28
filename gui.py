@@ -50,6 +50,7 @@ from algebras.partition import PartitionAlgebra
 from algebras.brauer import BrauerAlgebra
 from algebras.walled_brauer import WalledBrauerAlgebra
 from algebras.symmetric import SymmetricGroupAlgebra
+from algebras.half_partition import HalfPartitionAlgebra
 
 
 class DiagramRenderer:
@@ -574,7 +575,7 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
         self.algebra_selector = QtWidgets.QComboBox()
         self.algebra_selector.addItems(
-            ["partition", "brauer", "walled_brauer", "symmetric"]
+            ["partition", "half_partition", "brauer", "walled_brauer", "symmetric"]
         )
         row1.addWidget(QtWidgets.QLabel("Algebra:"))
         row1.addWidget(self.algebra_selector)
@@ -773,9 +774,9 @@ class AlgebraGui(QtWidgets.QMainWindow):
         symbolic_d = self.symbolic_d_checkbox.isChecked()
         d_value = None if symbolic_d else self.d_spin.value()
         if alg == "partition":
-            self.algebra = PartitionAlgebra(
-                self.k_spin.value(), d=d_value, symbolic_d=symbolic_d
-            )
+            self.algebra = PartitionAlgebra(self.k_spin.value(), d=d_value, symbolic_d=symbolic_d)
+        elif alg == "half_partition":
+            self.algebra = HalfPartitionAlgebra(self.k_spin.value(), d=d_value, symbolic_d=symbolic_d)
         elif alg == "brauer":
             self.algebra = BrauerAlgebra(
                 self.k_spin.value(), d=d_value, symbolic_d=symbolic_d
@@ -1240,15 +1241,18 @@ class AlgebraGui(QtWidgets.QMainWindow):
         vec_a = [units[row_a].get(j, sympy.S.Zero) for j in col_order]
         norm_sq_a = sympy.simplify(sum(a * a for a in vec_a))
         norm_a = sympy.sqrt(norm_sq_a)
+
         if len(selected) == 1:
-            norm_sq_display = norm_sq_a
+            norm_display = norm_sq_a
             approx_text = ""
-            if norm_sq_display.is_number:
-                norm_sq_display = sympy.nsimplify(norm_sq_display, rational=True)
+            if norm_display.is_number:
+                # keep exact form if possible, but also show a float approx
+                norm_display = sympy.nsimplify(norm_display, rational=True)
                 approx_val = _safe_float(sympy.N(norm_sq_a))
                 if approx_val is not None:
                     approx_text = f" ({approx_val:.10f})"
-            norm_text = f"Norm^2: {format_expr(norm_sq_display)}{approx_text}."
+
+            norm_text = f"Norm^2: {format_expr(norm_display)}{approx_text}."
             label_a = unit_labels[row_a]
             self.units_angle_label.setText(f"{label_a} — {norm_text}")
             return
