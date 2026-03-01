@@ -9,9 +9,12 @@ class HalfPartitionAlgebra(PartitionAlgebra):
     """
     Half-partition algebra P_{k+1/2}(d).
 
-    Implementation model:
-      - diagrams live on columns 1..(k+1) (so renderer works with self.k = k+1)
-      - basis is partitions of ±[k+1] with the constraint {k+1, -(k+1)} in the same block
+    Implementation model (IMPORTANT):
+      - This algebra has a diagram basis indexed by set partitions of 2k+1 points.
+      - We model it using integers {1,...,k+1} (top) and {-1,...,-k} (bottom),
+        so the distinguished point (k+1) appears ONLY ONCE (it is "shared").
+      - Composition glues (-i) from the left factor to (+i) of the right factor
+        for i=1..k, and also identifies the distinguished points (+k+1) across factors.
       - Bratteli tower stops at level 2k+1 (so e-indices are 1..2k)
       - generators: s_1..s_{k-1}, b_1..b_k, p_1..p_k
     """
@@ -20,11 +23,60 @@ class HalfPartitionAlgebra(PartitionAlgebra):
 
     def __init__(self, k: int, d=None, symbolic_d=False):
         # Here k means the integer part in P_{k+1/2}.
-        # We store (k+1) columns so the renderer/table logic stays unchanged.
+        # We still store self.k = k+1 so the renderer spacing stays reasonable,
+        # but the *basis elements* live on {1..k+1} ∪ {-1..-k}.
         self.k_int = int(k)
         super().__init__(self.k_int + 1, d=d, symbolic_d=symbolic_d)
 
+    # ---------------- identity / involution ----------------
+    def _identity_element(self):
+        # Identity: i is paired to -i for i=1..k, and the distinguished top point (k+1)
+        # is a singleton.
+        blocks = [{i, -i} for i in range(1, self.k_int + 1)]
+        blocks.append({self.k_int + 1})
+        return SetPartition(blocks)
+
     # ---------------- generators ----------------
+    def _diagram_s(self, i):
+        # swap generator for i=1..k-1
+        blocks = [{i, -(i + 1)}, {i + 1, -i}]
+        for j in range(1, self.k_int + 1):
+            if j in (i, i + 1):
+                continue
+            blocks.append({j, -j})
+        blocks.append({self.k_int + 1})
+        return SetPartition(blocks)
+
+    def _diagram_p(self, i):
+        # point generator for i=1..k
+        blocks = [{i}, {-i}]
+        for j in range(1, self.k_int + 1):
+            if j == i:
+                continue
+            blocks.append({j, -j})
+        blocks.append({self.k_int + 1})
+        return SetPartition(blocks)
+
+    def _diagram_e(self, i):
+        # bridge generators b_i for i=1..k.
+        #
+        # For i<k, this is the usual 4-block {i,i+1,-i,-(i+1)}.
+        # For i=k, there is no bottom -(k+1), so we use the 3-block {k, k+1, -k}
+        # connecting the last ordinary strand to the distinguished point.
+        blocks = []
+        if i < self.k_int:
+            blocks.append({i, i + 1, -i, -(i + 1)})
+        else:
+            blocks.append({self.k_int, self.k_int + 1, -self.k_int})
+        for j in range(1, self.k_int + 1):
+            if j in (i, i + 1) or (i == self.k_int and j == self.k_int):
+                continue
+            blocks.append({j, -j})
+        # distinguished point is already in the big block if i==k; otherwise singleton
+        if i < self.k_int:
+            blocks.append({self.k_int + 1})
+        return SetPartition(blocks)
+
     def _generator_diagrams(self):
         gens = []
         # s_i for i=1..k-1 (do not swap with last fixed column)
@@ -40,23 +92,91 @@ class HalfPartitionAlgebra(PartitionAlgebra):
 
     # ---------------- basis enumeration ----------------
     def _generate_basis(self):
-        # basis elements are set partitions of ±[k+1] with {k+1, -(k+1)} in same block
-        ncols = self.k_int + 1
-        elts = list(range(1, ncols + 1)) + [-i for i in range(1, ncols + 1)]
-        all_parts = self._all_partitions(elts)
+        # basis elements are set partitions of {1..k+1} ∪ {-1..-k}
+        top = list(range(1, self.k_int + 2))          # 1..k+1
+        bottom = [-i for i in range(1, self.k_int + 1)]  # -1..-k
+        elts = top + bottom
+        return self._all_partitions(elts)
 
-        fixed_a = ncols
-        fixed_b = -ncols
-        out = []
-        for P in all_parts:
-            ok = False
-            for blk in P.blocks:
-                if fixed_a in blk and fixed_b in blk:
-                    ok = True
-                    break
-            if ok:
-                out.append(P)
-        return out
+    # ---------------- composition (diagram multiplication) ----------------
+    def _compose(self, p1, p2):
+        """
+        Compose two half-partition diagrams.
+
+        Boundary of result:
+          - top:   1..k+1 from the LEFT factor (p1)
+          - bottom: -1..-k from the RIGHT factor (p2)
+
+        Gluing:
+          - glue (-i) from p1 to (+i) from p2 for i=1..k
+          - identify the distinguished points (+k+1) across p1 and p2
+        """
+        adj = defaultdict(list)
+
+        def add_edge(u, v):
+            adj[u].append(v)
+            adj[v].append(u)
+
+        def connect_block(layer, block):
+            nodes = [(layer, x) for x in block]
+            for n in nodes:
+                adj.setdefault(n, [])
+            if len(nodes) <= 1:
+                return
+            head = nodes[0]
+            for n in nodes[1:]:
+                add_edge(head, n)
+
+        for b in p1.blocks:
+            connect_block("p1", b)
+        for b in p2.blocks:
+            connect_block("p2", b)
+
+        # glue the ordinary bottom nodes
+        for i in range(1, self.k_int + 1):
+            add_edge(("p1", -i), ("p2", i))
+
+        # identify the distinguished point across the two factors
+        add_edge(("p1", self.k_int + 1), ("p2", self.k_int + 1))
+
+        visited = set()
+        blocks = []
+        loops = 0
+
+        def is_boundary(node):
+            side, val = node
+            if side == "p1" and val > 0:
+                return True
+            if side == "p2" and val < 0:
+                return True
+            return False
+
+        def boundary_label(node):
+            return node[1]
+
+        for start in adj:
+            if start in visited:
+                continue
+            stack = [start]
+            comp = set()
+            while stack:
+                v = stack.pop()
+                if v in visited:
+                    continue
+                visited.add(v)
+                comp.add(v)
+                for w in adj[v]:
+                    if w not in visited:
+                        stack.append(w)
+
+            boundary = [node for node in comp if is_boundary(node)]
+            if len(boundary) == 0:
+                loops += 1
+            else:
+                labels = {boundary_label(n) for n in boundary}
+                blocks.append(labels)
+
+        return SetPartition(blocks), loops
 
     # ---------------- irreps / paths ----------------
     def _compute_irreps_and_paths(self):

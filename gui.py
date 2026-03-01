@@ -223,6 +223,58 @@ def _is_negative_coeff(coeff):
         return str(coeff).startswith("-")
 
 
+class _DSU:
+    def __init__(self, n: int):
+        self.p = list(range(n))
+        self.r = [0] * n
+
+    def find(self, x: int) -> int:
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        ra = self.find(a)
+        rb = self.find(b)
+        if ra == rb:
+            return
+        if self.r[ra] < self.r[rb]:
+            ra, rb = rb, ra
+        self.p[rb] = ra
+        if self.r[ra] == self.r[rb]:
+            self.r[ra] += 1
+
+
+def _partition_join_block_count(blocks_a, blocks_b, element_to_idx):
+    """
+    Join of two set partitions as the connected components of the graph where
+    we connect any two elements that lie in the same block of either partition.
+    Returns the number of blocks (connected components) in the join.
+    """
+    n = len(element_to_idx)
+    dsu = _DSU(n)
+
+    def union_block(block):
+        if not block:
+            return
+        it = iter(block)
+        first = next(it, None)
+        if first is None:
+            return
+        f = element_to_idx[first]
+        for x in it:
+            dsu.union(f, element_to_idx[x])
+
+    for blk in blocks_a:
+        union_block(blk)
+    for blk in blocks_b:
+        union_block(blk)
+
+    roots = {dsu.find(i) for i in range(n)}
+    return len(roots)
+
+
 def format_term(coeff, label):
     if coeff == 1:
         return False, label
@@ -562,6 +614,8 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
         self.algebra = None
         self.renderer = None
+        self._gram_S_cache_key = None
+        self._gram_S_cache_matrix = None
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -602,7 +656,7 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
         self.d_spin = QtWidgets.QSpinBox()
         self.d_spin.setMinimum(-1000)
-        self.d_spin.setMaximum(1000)
+        self.d_spin.setMaximum(100000)
         self.d_spin.setValue(5)
         row1.addWidget(QtWidgets.QLabel("d:"))
         row1.addWidget(self.d_spin)
@@ -619,7 +673,9 @@ class AlgebraGui(QtWidgets.QMainWindow):
         control_panel.addLayout(row2)
 
         self.display_selector = QtWidgets.QComboBox()
-        self.display_selector.addItems(["gram", "dual", "irreps", "matrix_units"])
+        self.display_selector.addItems(
+            ["gram", "gram_S", "gram_S_fourier", "dual", "irreps", "matrix_units"]
+        )
         row2.addWidget(QtWidgets.QLabel("Show:"))
         row2.addWidget(self.display_selector)
 
@@ -809,6 +865,22 @@ class AlgebraGui(QtWidgets.QMainWindow):
             self.irrep_scroll.setVisible(False)
             self.units_angle_label.setVisible(False)
             self.units_warning_label.setVisible(False)
+        elif mode == "gram_S":
+            self.gram_table.setVisible(True)
+            self.dual_table.setVisible(False)
+            self.units_table.setVisible(False)
+            self.irrep_scroll.setVisible(False)
+            self.units_angle_label.setVisible(False)
+            self.units_warning_label.setVisible(False)
+            self._populate_gram_matrix_S()
+        elif mode == "gram_S_fourier":
+            self.gram_table.setVisible(True)
+            self.dual_table.setVisible(False)
+            self.units_table.setVisible(False)
+            self.irrep_scroll.setVisible(False)
+            self.units_angle_label.setVisible(False)
+            self.units_warning_label.setVisible(True)
+            self._populate_gram_matrix_S_fourier()
         elif mode == "dual":
             self.gram_table.setVisible(False)
             self.dual_table.setVisible(True)
@@ -838,10 +910,57 @@ class AlgebraGui(QtWidgets.QMainWindow):
         mode = self.display_selector.currentText()
         if mode == "gram":
             self._populate_gram_matrix()
+        elif mode == "gram_S":
+            self._populate_gram_matrix_S()
+        elif mode == "gram_S_fourier":
+            self._populate_gram_matrix_S_fourier()
         elif mode == "dual":
             self._populate_dual_basis()
         elif mode == "matrix_units":
             self._populate_matrix_units()
+
+    def _compute_gram_matrix_S(self):
+        """
+        Compute (and cache) the diagram-basis Gram matrix for the inner product
+          <D,E>_S = d^{-cc(D)/2 - cc(E)/2 + cc(D join E)}.
+        Returns an n×n Python list-of-lists of SymPy expressions.
+        """
+        alg = self.algebra
+        if alg is None:
+            return []
+        key = (alg.algebra_id, alg.k, str(alg.d), bool(getattr(alg, "is_symbolic_d", False)))
+        if key == self._gram_S_cache_key and self._gram_S_cache_matrix is not None:
+            return self._gram_S_cache_matrix
+
+        basis = alg.basis
+        n = alg.dim
+        if n == 0:
+            return []
+
+        # Determine ground set once (any basis element contains all elements).
+        ground = sorted({x for blk in basis[0].blocks for x in blk}, key=lambda t: (abs(t), t))
+        element_to_idx = {x: i for i, x in enumerate(ground)}
+
+        # Precompute cc(D) and blocks as plain Python lists (speed).
+        block_lists = [[list(blk) for blk in elem.blocks] for elem in basis]
+        cc = [len(blks) for blks in block_lists]
+
+        M = [[sympy.S.Zero for _ in range(n)] for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                join_cc = _partition_join_block_count(
+                    block_lists[i], block_lists[j], element_to_idx
+                )
+                exp = (
+                    sympy.Rational(-cc[i], 2)
+                    + sympy.Rational(-cc[j], 2)
+                    + sympy.Integer(join_cc)
+                )
+                M[i][j] = sympy.simplify(alg.d ** exp)
+
+        self._gram_S_cache_key = key
+        self._gram_S_cache_matrix = M
+        return M
 
     def _populate_gram_matrix(self):
         alg = self.algebra
@@ -939,6 +1058,264 @@ class AlgebraGui(QtWidgets.QMainWindow):
         elif show_mode == "label":
             self.gram_table.horizontalHeader().setDefaultSectionSize(120)
             self.gram_table.verticalHeader().setDefaultSectionSize(28)
+        self.gram_table.resizeColumnsToContents()
+        self.gram_table.resizeRowsToContents()
+
+    def _populate_gram_matrix_S(self):
+        """
+        Display Gram matrix on the diagram basis with respect to
+          <D,E>_S = d^{-cc(D)/2 - cc(E)/2 + cc(D join E)}.
+
+        Here cc(.) is the number of blocks of the set partition, and "join"
+        is the join in the lattice of set partitions (transitive closure of the
+        union of equivalence relations).
+        """
+        alg = self.algebra
+        basis = alg.basis
+        labels = [alg.label_of(b) for b in basis]
+        n = alg.dim
+
+        M = self._compute_gram_matrix_S()
+
+        self.gram_table.clear()
+        self.gram_table.setRowCount(n)
+        self.gram_table.setColumnCount(n)
+
+        degrees = []
+        values = []
+        for i in range(n):
+            for j in range(n):
+                if self._d_is_symbolic():
+                    deg = leading_degree(M[i][j], alg.d)
+                    if deg is not None:
+                        degrees.append(deg)
+                else:
+                    val = _numeric_value(M[i][j])
+                    if val is not None:
+                        values.append(val)
+        min_deg = min(degrees) if degrees else None
+        max_deg = max(degrees) if degrees else None
+        min_val = min(values) if values else None
+        max_val = max(values) if values else None
+
+        # IMPORTANT: in this view we always use the same order for rows and columns.
+        # We compute a symmetric score per basis index from both the row and column.
+        scores = []
+        if self._d_is_symbolic():
+            for i in range(n):
+                degs = []
+                for j in range(n):
+                    d1 = leading_degree(M[i][j], alg.d)
+                    if d1 is not None:
+                        degs.append(d1)
+                    d2 = leading_degree(M[j][i], alg.d)
+                    if d2 is not None:
+                        degs.append(d2)
+                score = (sum(degs) / len(degs)) if degs else 0
+                scores.append((score, i))
+        else:
+            for i in range(n):
+                vals = []
+                for j in range(n):
+                    v1 = _numeric_value(M[i][j])
+                    if v1 is not None:
+                        vals.append(v1)
+                    v2 = _numeric_value(M[j][i])
+                    if v2 is not None:
+                        vals.append(v2)
+                score = (sum(vals) / len(vals)) if vals else 0
+                scores.append((score, i))
+        scores.sort(key=lambda x: x[0], reverse=False)
+        order = [idx for _, idx in scores]
+        row_order = order
+        col_order = order
+
+        for row_idx, i in enumerate(row_order):
+            for col_idx, j in enumerate(col_order):
+                val = M[i][j]
+                display_text = self._format_cell(val, alg.d)
+                item = QtWidgets.QTableWidgetItem(display_text)
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+                if self._d_is_symbolic():
+                    color = degree_color(
+                        leading_degree(val, alg.d), min_deg, max_deg
+                    )
+                else:
+                    color = numeric_color(
+                        _numeric_value(val), min_val, max_val
+                    )
+                item.setBackground(QtGui.QBrush(color))
+                self.gram_table.setItem(row_idx, col_idx, item)
+
+        pixmaps = [self.renderer.render_pixmap(b, labels[i]) for i, b in enumerate(basis)]
+        pixmaps_ordered = [pixmaps[idx] for idx in col_order]
+        pixmaps_rows = [pixmaps[idx] for idx in row_order]
+        show_mode = self.label_selector.currentText()
+        hheader = self.gram_table.horizontalHeader()
+        vheader = self.gram_table.verticalHeader()
+        hheader.set_mode(show_mode)
+        vheader.set_mode(show_mode)
+        hheader.set_pixmaps(pixmaps_ordered if show_mode == "diagram" else None)
+        vheader.set_pixmaps(pixmaps_rows if show_mode == "diagram" else None)
+
+        for pos, idx in enumerate(col_order):
+            if show_mode == "label":
+                item = QtWidgets.QTableWidgetItem(labels[idx])
+                item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+                self.gram_table.setHorizontalHeaderItem(pos, item)
+            else:
+                self.gram_table.setHorizontalHeaderItem(pos, QtWidgets.QTableWidgetItem())
+
+        for pos, idx in enumerate(row_order):
+            if show_mode == "label":
+                vitem = QtWidgets.QTableWidgetItem(labels[idx])
+                vitem.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+                self.gram_table.setVerticalHeaderItem(pos, vitem)
+            else:
+                self.gram_table.setVerticalHeaderItem(pos, QtWidgets.QTableWidgetItem())
+
+        if pixmaps and show_mode == "diagram":
+            hheader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+            vheader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+            hheader.setFixedHeight(pixmaps_ordered[0].height())
+            vheader.setFixedWidth(pixmaps_rows[0].width())
+            hheader.setMinimumSectionSize(pixmaps_ordered[0].width())
+            vheader.setMinimumSectionSize(pixmaps_rows[0].height())
+            hheader.setDefaultSectionSize(pixmaps_ordered[0].width())
+            vheader.setDefaultSectionSize(pixmaps_rows[0].height())
+        elif show_mode == "label":
+            self.gram_table.horizontalHeader().setDefaultSectionSize(120)
+            self.gram_table.verticalHeader().setDefaultSectionSize(28)
+        self.gram_table.resizeColumnsToContents()
+        self.gram_table.resizeRowsToContents()
+
+    def _populate_gram_matrix_S_fourier(self):
+        """
+        Gram matrix for the Fourier basis (matrix units E_{ij}^rho) with respect to <.,.>_S.
+
+        We interpret <x,y>_S by bilinear extension from the diagram basis using the
+        diagram-basis S-Gram matrix.
+        """
+        alg = self.algebra
+        if alg is None:
+            return
+
+        if self._d_is_symbolic():
+            self.units_warning_label.setText(
+                "gram_S_fourier: numeric d only (symbolic is too slow)."
+            )
+            self.gram_table.clear()
+            self.gram_table.setRowCount(0)
+            self.gram_table.setColumnCount(0)
+            return
+
+        n = alg.dim
+        if n == 0:
+            return
+        if n > 120:
+            self.units_warning_label.setText(
+                f"gram_S_fourier: dim={n} is large; this view is disabled to avoid freezing."
+            )
+            self.gram_table.clear()
+            self.gram_table.setRowCount(0)
+            self.gram_table.setColumnCount(0)
+            return
+
+        self.units_warning_label.setText("")
+
+        S = self._compute_gram_matrix_S()
+        units = alg.matrix_units
+        unit_labels = alg.matrix_unit_labels
+        if len(units) != n or len(unit_labels) != n:
+            self.units_warning_label.setText(
+                "gram_S_fourier: matrix units unavailable; try clearing cache/*.json and reload."
+            )
+            self.gram_table.clear()
+            self.gram_table.setRowCount(0)
+            self.gram_table.setColumnCount(0)
+            return
+
+        # Fixed, shared order (irrep_idx, i, j) on both axes.
+        unit_label_keys = []
+        for irrep_idx, paths in enumerate(alg.bratteli_paths):
+            for i in range(len(paths)):
+                for j in range(len(paths)):
+                    unit_label_keys.append((irrep_idx, i, j))
+        order = sorted(range(n), key=lambda idx: unit_label_keys[idx])
+        row_order = order
+        col_order = order
+
+        # Convert S and units to float matrices/vectors for speed.
+        S_float = [[float(sympy.N(S[i][j])) for j in range(n)] for i in range(n)]
+        U = [[0.0] * n for _ in range(n)]
+        for alpha, u in enumerate(units):
+            for a, ca in u.items():
+                U[alpha][a] = float(sympy.N(ca))
+
+        # Compute G = U * S * U^T in O(n^3).
+        G = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            # r = U[i] * S
+            r = [0.0] * n
+            ui = U[i]
+            for a in range(n):
+                ca = ui[a]
+                if ca == 0.0:
+                    continue
+                Sa = S_float[a]
+                for b in range(n):
+                    r[b] += ca * Sa[b]
+            for j in range(n):
+                uj = U[j]
+                s = 0.0
+                for b in range(n):
+                    if r[b] != 0.0 and uj[b] != 0.0:
+                        s += r[b] * uj[b]
+                G[i][j] = s
+
+        self.gram_table.clear()
+        self.gram_table.setRowCount(n)
+        self.gram_table.setColumnCount(n)
+
+        values = []
+        for i in range(n):
+            for j in range(n):
+                values.append(G[i][j])
+        min_val = min(values) if values else None
+        max_val = max(values) if values else None
+
+        for row_pos, i in enumerate(row_order):
+            for col_pos, j in enumerate(col_order):
+                val = sympy.Float(G[i][j])
+                display_text = self._format_cell(val, alg.d)
+                item = QtWidgets.QTableWidgetItem(display_text)
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+                color = numeric_color(G[i][j], min_val, max_val)
+                item.setBackground(QtGui.QBrush(color))
+                self.gram_table.setItem(row_pos, col_pos, item)
+
+        # Use text labels (matrix unit names) on both axes; keep same order.
+        hheader = self.gram_table.horizontalHeader()
+        vheader = self.gram_table.verticalHeader()
+        hheader.set_mode("label")
+        vheader.set_mode("label")
+        hheader.set_pixmaps(None)
+        vheader.set_pixmaps(None)
+
+        for pos, idx in enumerate(col_order):
+            item = QtWidgets.QTableWidgetItem(unit_labels[idx])
+            item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+            self.gram_table.setHorizontalHeaderItem(pos, item)
+
+        for pos, idx in enumerate(row_order):
+            item = QtWidgets.QTableWidgetItem(unit_labels[idx])
+            item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+            self.gram_table.setVerticalHeaderItem(pos, item)
+
+        self.gram_table.horizontalHeader().setDefaultSectionSize(160)
+        self.gram_table.verticalHeader().setDefaultSectionSize(48)
         self.gram_table.resizeColumnsToContents()
         self.gram_table.resizeRowsToContents()
 

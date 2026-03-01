@@ -247,7 +247,7 @@ class DiagramAlgebra(ABC):
     """
 
     algebra_id = "diagram"
-    cache_version = "v25"
+    cache_version = "v27"
 
     def __init__(self, k, d=5, symbolic_d=False):
         self.k = k
@@ -681,15 +681,22 @@ class DiagramAlgebra(ABC):
 
     def _compute_matrix_units(self):
         # E^rho_{ij} = d_rho * sum_a rho(a^*)_{ij} * a, where a^* is dual basis.
+        #
+        # IMPORTANT: do NOT compute rho(a) from `label_of(a)` alone.
+        # The BFS labels ignore the scalar factor d^(#loops) that arises when composing
+        # diagrams; omitting it corrupts rho(a) and therefore the matrix units.
         basis = self.basis
-        basis_labels = [self.label_of(a) for a in basis]
+        basis_words = self._basis_words_with_loop_powers()
         dual = self.dual_basis
         units = []
         for ir_idx, paths in enumerate(self.bratteli_paths):
             d_rho = len(paths)
-            rho_basis = [
-                self.irrep_matrix_for_label(ir_idx, lbl) for lbl in basis_labels
-            ]
+            rho_basis = []
+            for coeff, word in basis_words:
+                M = self.irrep_matrix_for_label(ir_idx, word)
+                # The BFS word represents (coeff) * (basis diagram).
+                # So rho(basis diagram) = rho(word) / coeff.
+                rho_basis.append(sympy.simplify(M / coeff))
             irrep_units = [dict() for _ in range(d_rho * d_rho)]
             for a_idx, coeffs in enumerate(dual):
                 rho_a_star = sympy.zeros(d_rho, d_rho)
@@ -702,6 +709,56 @@ class DiagramAlgebra(ABC):
                             irrep_units[i * d_rho + j][a_idx] = coeff
             units.extend(irrep_units)
         return units
+
+    def _basis_words_with_loop_powers(self):
+        """
+        Return a list indexed by basis element index a_idx:
+          (coeff, word)
+        such that in the diagram algebra (not the monoid),
+          (product of generators named by `word`) = coeff * basis[a_idx]
+        where coeff is a power of d coming from closed loops in diagram composition.
+        """
+        generators = self._generator_diagrams()
+        if not generators:
+            return [(sympy.S.One, "1") for _ in range(self.dim)]
+
+        start = self._identity_element()
+        start_idx = self._basis_lookup[self._key(start)]
+
+        coeffs = [None for _ in range(self.dim)]
+        words = [None for _ in range(self.dim)]
+        coeffs[start_idx] = sympy.S.One
+        words[start_idx] = "1"
+
+        q = deque([start])
+        while q:
+            current = q.popleft()
+            cur_idx = self._basis_lookup[self._key(current)]
+            cur_coeff = coeffs[cur_idx]
+            cur_word = words[cur_idx]
+            for name, gen in generators:
+                res, loops = self._compose(current, gen)
+                res_idx = self._basis_lookup[self._key(res)]
+                if words[res_idx] is not None:
+                    continue
+                next_coeff = sympy.simplify(cur_coeff * (self.d ** loops))
+                next_word = name if cur_word == "1" else f"{cur_word} {name}"
+                coeffs[res_idx] = next_coeff
+                words[res_idx] = next_word
+                q.append(res)
+                if all(w is not None for w in words):
+                    break
+            if all(w is not None for w in words):
+                break
+
+        out = []
+        for i in range(self.dim):
+            if words[i] is None:
+                # Fallback: treat as unscaled, using existing label (best effort).
+                out.append((sympy.S.One, self.label_of(self.basis[i])))
+            else:
+                out.append((coeffs[i], words[i]))
+        return out
 
     def _compute_matrix_unit_labels(self):
         labels = []
