@@ -674,7 +674,14 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
         self.display_selector = QtWidgets.QComboBox()
         self.display_selector.addItems(
-            ["gram", "gram_S", "gram_S_fourier", "dual", "irreps", "matrix_units"]
+            [
+                "computational gram matrix",
+                "schur gram matrix",
+                "dual basis",
+                "irreps",
+                "fourier basis states",
+                "approx_ft",
+            ]
         )
         row2.addWidget(QtWidgets.QLabel("Show:"))
         row2.addWidget(self.display_selector)
@@ -858,14 +865,14 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
     def _refresh_visibility(self):
         mode = self.display_selector.currentText()
-        if mode == "gram":
+        if mode == "computational gram matrix":
             self.gram_table.setVisible(True)
             self.dual_table.setVisible(False)
             self.units_table.setVisible(False)
             self.irrep_scroll.setVisible(False)
             self.units_angle_label.setVisible(False)
             self.units_warning_label.setVisible(False)
-        elif mode == "gram_S":
+        elif mode == "schur gram matrix":
             self.gram_table.setVisible(True)
             self.dual_table.setVisible(False)
             self.units_table.setVisible(False)
@@ -873,22 +880,22 @@ class AlgebraGui(QtWidgets.QMainWindow):
             self.units_angle_label.setVisible(False)
             self.units_warning_label.setVisible(False)
             self._populate_gram_matrix_S()
-        elif mode == "gram_S_fourier":
+        elif mode == "approx_ft":
             self.gram_table.setVisible(True)
             self.dual_table.setVisible(False)
             self.units_table.setVisible(False)
             self.irrep_scroll.setVisible(False)
             self.units_angle_label.setVisible(False)
             self.units_warning_label.setVisible(True)
-            self._populate_gram_matrix_S_fourier()
-        elif mode == "dual":
+            self._populate_approx_fourier_transform()
+        elif mode == "dual basis":
             self.gram_table.setVisible(False)
             self.dual_table.setVisible(True)
             self.units_table.setVisible(False)
             self.irrep_scroll.setVisible(False)
             self.units_angle_label.setVisible(False)
             self.units_warning_label.setVisible(False)
-        elif mode == "matrix_units":
+        elif mode == "fourier basis states":
             self.gram_table.setVisible(False)
             self.dual_table.setVisible(False)
             self.units_table.setVisible(True)
@@ -908,15 +915,15 @@ class AlgebraGui(QtWidgets.QMainWindow):
         if self.algebra is None:
             return
         mode = self.display_selector.currentText()
-        if mode == "gram":
+        if mode == "computational gram matrix":
             self._populate_gram_matrix()
-        elif mode == "gram_S":
+        elif mode == "schur gram matrix":
             self._populate_gram_matrix_S()
-        elif mode == "gram_S_fourier":
-            self._populate_gram_matrix_S_fourier()
-        elif mode == "dual":
+        elif mode == "approx_ft":
+            self._populate_approx_fourier_transform()
+        elif mode == "dual basis":
             self._populate_dual_basis()
-        elif mode == "matrix_units":
+        elif mode == "fourier basis states":
             self._populate_matrix_units()
 
     def _compute_gram_matrix_S(self):
@@ -1190,32 +1197,29 @@ class AlgebraGui(QtWidgets.QMainWindow):
         self.gram_table.resizeColumnsToContents()
         self.gram_table.resizeRowsToContents()
 
-    def _populate_gram_matrix_S_fourier(self):
+    def _populate_approx_fourier_transform(self):
         """
-        Gram matrix for the Fourier basis (matrix units E_{ij}^rho) with respect to <.,.>_S.
+        Display the approximate Fourier transform \\tilde{F}_A defined by
 
-        We interpret <x,y>_S by bilinear extension from the diagram basis using the
-        diagram-basis S-Gram matrix.
+          \\tilde{F}_A |a> = sum_{rho,i,j} ||E_{ij}^rho||_2 * rho(a)_{ij} |rho,i,j>
+
+        where ||.||_2 is the Euclidean norm with respect to the computational basis
+        used throughout the app (same normalization as the matrix_units view).
+
+        Rows: computational basis diagrams a (alg.basis order).
+        Columns: Fourier basis states (rho,i,j) in (irrep_idx,i,j) order.
         """
         alg = self.algebra
         if alg is None:
             return
 
-        if self._d_is_symbolic():
-            self.units_warning_label.setText(
-                "gram_S_fourier: numeric d only (symbolic is too slow)."
-            )
-            self.gram_table.clear()
-            self.gram_table.setRowCount(0)
-            self.gram_table.setColumnCount(0)
-            return
-
         n = alg.dim
         if n == 0:
             return
+
         if n > 120:
             self.units_warning_label.setText(
-                f"gram_S_fourier: dim={n} is large; this view is disabled to avoid freezing."
+                f"approx_ft: dim={n} is large; this view is disabled to avoid freezing."
             )
             self.gram_table.clear()
             self.gram_table.setRowCount(0)
@@ -1224,98 +1228,141 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
         self.units_warning_label.setText("")
 
-        S = self._compute_gram_matrix_S()
-        units = alg.matrix_units
+        basis = alg.basis
+        basis_labels = [alg.label_of(b) for b in basis]
         unit_labels = alg.matrix_unit_labels
-        if len(units) != n or len(unit_labels) != n:
-            self.units_warning_label.setText(
-                "gram_S_fourier: matrix units unavailable; try clearing cache/*.json and reload."
-            )
-            self.gram_table.clear()
-            self.gram_table.setRowCount(0)
-            self.gram_table.setColumnCount(0)
-            return
 
-        # Fixed, shared order (irrep_idx, i, j) on both axes.
+        # Column order (irrep_idx, i, j) on the Fourier basis.
         unit_label_keys = []
         for irrep_idx, paths in enumerate(alg.bratteli_paths):
             for i in range(len(paths)):
                 for j in range(len(paths)):
                     unit_label_keys.append((irrep_idx, i, j))
-        order = sorted(range(n), key=lambda idx: unit_label_keys[idx])
-        row_order = order
-        col_order = order
+        col_order = sorted(range(n), key=lambda idx: unit_label_keys[idx])
+        row_order = list(range(n))
 
-        # Convert S and units to float matrices/vectors for speed.
-        S_float = [[float(sympy.N(S[i][j])) for j in range(n)] for i in range(n)]
-        U = [[0.0] * n for _ in range(n)]
-        for alpha, u in enumerate(units):
-            for a, ca in u.items():
-                U[alpha][a] = float(sympy.N(ca))
+        units = alg.matrix_units
+        norm_sq = [sympy.simplify(sum(c * c for c in u.values())) for u in units]
+        norms = [sympy.sqrt(x) for x in norm_sq]
 
-        # Compute G = U * S * U^T in O(n^3).
-        G = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            # r = U[i] * S
-            r = [0.0] * n
-            ui = U[i]
-            for a in range(n):
-                ca = ui[a]
-                if ca == 0.0:
-                    continue
-                Sa = S_float[a]
-                for b in range(n):
-                    r[b] += ca * Sa[b]
-            for j in range(n):
-                uj = U[j]
-                s = 0.0
-                for b in range(n):
-                    if r[b] != 0.0 and uj[b] != 0.0:
-                        s += r[b] * uj[b]
-                G[i][j] = s
+        basis_words = alg._basis_words_with_loop_powers()
 
+        T = [[sympy.S.Zero for _ in range(n)] for _ in range(n)]
+
+        # Fill per irrep block.
+        for irrep_idx, paths in enumerate(alg.bratteli_paths):
+            d_rho = len(paths)
+            rho_basis = []
+            for coeff, word in basis_words:
+                M = alg.irrep_matrix_for_label(irrep_idx, word)
+                rho_basis.append(sympy.simplify(M / coeff))
+
+            base_col = sum(len(p) ** 2 for p in alg.bratteli_paths[:irrep_idx])
+            for i in range(d_rho):
+                for j in range(d_rho):
+                    col = base_col + i * d_rho + j
+                    factor = norms[col]
+                    for a_idx in range(n):
+                        T[a_idx][col] = sympy.simplify(
+                            factor * rho_basis[a_idx][i, j]
+                        )
+
+        # Populate table.
         self.gram_table.clear()
         self.gram_table.setRowCount(n)
         self.gram_table.setColumnCount(n)
 
+        degrees = []
         values = []
         for i in range(n):
             for j in range(n):
-                values.append(G[i][j])
+                if self._d_is_symbolic():
+                    deg = leading_degree(T[i][j], alg.d)
+                    if deg is not None:
+                        degrees.append(deg)
+                else:
+                    val = _numeric_value(T[i][j])
+                    if val is not None:
+                        values.append(val)
+        min_deg = min(degrees) if degrees else None
+        max_deg = max(degrees) if degrees else None
         min_val = min(values) if values else None
         max_val = max(values) if values else None
 
         for row_pos, i in enumerate(row_order):
             for col_pos, j in enumerate(col_order):
-                val = sympy.Float(G[i][j])
+                val = T[i][j]
                 display_text = self._format_cell(val, alg.d)
                 item = QtWidgets.QTableWidgetItem(display_text)
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
-                color = numeric_color(G[i][j], min_val, max_val)
+                if self._d_is_symbolic():
+                    color = degree_color(
+                        leading_degree(val, alg.d), min_deg, max_deg
+                    )
+                else:
+                    color = numeric_color(
+                        _numeric_value(val), min_val, max_val
+                    )
                 item.setBackground(QtGui.QBrush(color))
                 self.gram_table.setItem(row_pos, col_pos, item)
 
-        # Use text labels (matrix unit names) on both axes; keep same order.
+        # Headers: rows are diagram basis; cols are Fourier basis states shown as Bratteli paths.
+        show_mode = self.label_selector.currentText()
         hheader = self.gram_table.horizontalHeader()
         vheader = self.gram_table.verticalHeader()
-        hheader.set_mode("label")
-        vheader.set_mode("label")
-        hheader.set_pixmaps(None)
-        vheader.set_pixmaps(None)
 
-        for pos, idx in enumerate(col_order):
-            item = QtWidgets.QTableWidgetItem(unit_labels[idx])
-            item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
-            self.gram_table.setHorizontalHeaderItem(pos, item)
+        # Column labels should match the row labels of the "fourier basis states" window:
+        # i.e. show (rho,i,j) as Bratteli paths with boxes.
+        unit_label_pixmaps = []
+        for irrep, paths in zip(alg.irreps, alg.bratteli_paths):
+            for i in range(len(paths)):
+                for j in range(len(paths)):
+                    unit_label_pixmaps.append(
+                        _render_matrix_unit_row_label(irrep, paths[i], paths[j])
+                    )
+        unit_label_pixmaps_ordered = [unit_label_pixmaps[idx] for idx in col_order]
+        hheader.set_mode("diagram")
+        hheader.set_pixmaps(unit_label_pixmaps_ordered)
+
+        vheader.set_mode(show_mode)
+        if show_mode == "diagram":
+            pixmaps = [
+                self.renderer.render_pixmap(b, basis_labels[idx])
+                for idx, b in enumerate(basis)
+            ]
+            pixmaps_rows = [pixmaps[idx] for idx in row_order]
+            vheader.set_pixmaps(pixmaps_rows)
+            vheader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+            vheader.setFixedWidth(pixmaps_rows[0].width())
+            vheader.setDefaultSectionSize(pixmaps_rows[0].height())
+        else:
+            vheader.set_pixmaps(None)
 
         for pos, idx in enumerate(row_order):
-            item = QtWidgets.QTableWidgetItem(unit_labels[idx])
-            item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
-            self.gram_table.setVerticalHeaderItem(pos, item)
+            if show_mode == "label":
+                vitem = QtWidgets.QTableWidgetItem(basis_labels[idx])
+                vitem.setForeground(QtGui.QBrush(QtGui.QColor("black")))
+                self.gram_table.setVerticalHeaderItem(pos, vitem)
+            else:
+                self.gram_table.setVerticalHeaderItem(pos, QtWidgets.QTableWidgetItem())
 
-        self.gram_table.horizontalHeader().setDefaultSectionSize(160)
-        self.gram_table.verticalHeader().setDefaultSectionSize(48)
+        # Horizontal header items are blank; the header paints pixmaps.
+        for pos, _idx in enumerate(col_order):
+            self.gram_table.setHorizontalHeaderItem(pos, QtWidgets.QTableWidgetItem())
+
+        if unit_label_pixmaps_ordered:
+            max_h = max(p.height() for p in unit_label_pixmaps_ordered)
+            max_w = max(p.width() for p in unit_label_pixmaps_ordered)
+            hheader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+            hheader.setFixedHeight(max_h)
+            hheader.setMinimumSectionSize(max_w)
+            hheader.setDefaultSectionSize(max_w)
+            for col_pos in range(n):
+                self.gram_table.setColumnWidth(col_pos, max_w)
+
+        if show_mode == "label":
+            self.gram_table.verticalHeader().setDefaultSectionSize(28)
         self.gram_table.resizeColumnsToContents()
         self.gram_table.resizeRowsToContents()
 
