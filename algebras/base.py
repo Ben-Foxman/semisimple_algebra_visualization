@@ -247,7 +247,7 @@ class DiagramAlgebra(ABC):
     """
 
     algebra_id = "diagram"
-    cache_version = "v27"
+    cache_version = "v35"
 
     def __init__(self, k, d=5, symbolic_d=False):
         self.k = k
@@ -258,6 +258,7 @@ class DiagramAlgebra(ABC):
         self._dual_basis_cache = None
         self._basis_traces = None
         self._label_list_cache = None
+        self._basis_scale_cache = None
         self._irreps_cache = None
         self._bratteli_cache = None
         self._irrep_matrices_cache = None
@@ -273,6 +274,45 @@ class DiagramAlgebra(ABC):
             self.dim = len(self.basis)
             self._basis_lookup = {self._key(p): i for i, p in enumerate(self.basis)}
             self._save_cache()
+
+        # Precompute computational-basis rescaling factors (if applicable).
+        self._basis_scale_cache = self._compute_basis_scale_cache()
+
+    def _compute_basis_scale_cache(self):
+        """
+        Optional computational-basis rescaling for SetPartition-based diagram algebras.
+
+        We treat the computational basis element corresponding to a diagram `a` as
+
+            b_a := d^{(k - cc(a))/2} * a
+
+        where:
+          - cc(a) is the number of blocks of the set partition diagram a
+          - k is self.k
+
+        Notes:
+          - For Brauer/Walled-Brauer bases (pair partitions), cc(a)=k for all basis
+            elements, so this scale is identically 1 and those algebras are unchanged.
+          - For partition/half-partition bases, cc(a) varies, so this changes the
+            computational basis and therefore Gram/dual/matrix units, etc.
+        """
+        if not self.basis:
+            return []
+        b0 = self.basis[0]
+        if not hasattr(b0, "blocks"):
+            return [sympy.S.One for _ in range(self.dim)]
+        out = []
+        for a in self.basis:
+            cc = len(a.blocks)
+            out.append(sympy.simplify(self.d ** (sympy.Rational(self.k - cc, 2))))
+        return out
+
+    def _basis_scale(self, basis_idx: int):
+        if self._basis_scale_cache is None:
+            self._basis_scale_cache = self._compute_basis_scale_cache()
+        if not self._basis_scale_cache:
+            return sympy.S.One
+        return self._basis_scale_cache[basis_idx]
 
     @abstractmethod
     def _generate_basis(self):
@@ -607,9 +647,16 @@ class DiagramAlgebra(ABC):
         for i, p1 in enumerate(self.basis):
             for j, p2 in enumerate(self.basis):
                 res, nloops = self._compose(p1, p2)
-                coeff = self.d ** nloops
+                coeff_raw = self.d ** nloops
                 key = self._key(res)
                 idx = self._basis_lookup[key]
+                # Convert from diagram basis to scaled computational basis:
+                # b_i = s_i * p_i, b_j = s_j * p_j, b_idx = s_idx * res
+                # so b_i*b_j = coeff_raw * (s_i*s_j/s_idx) * b_idx.
+                s_i = self._basis_scale(i)
+                s_j = self._basis_scale(j)
+                s_k = self._basis_scale(idx)
+                coeff = sympy.simplify(coeff_raw * s_i * s_j / s_k)
                 table[(i, j)] = (idx, coeff)
         return table
 
@@ -727,7 +774,9 @@ class DiagramAlgebra(ABC):
 
         coeffs = [None for _ in range(self.dim)]
         words = [None for _ in range(self.dim)]
-        coeffs[start_idx] = sympy.S.One
+        # Invariant: (word product) = coeffs[idx] * b_idx (scaled computational basis).
+        # For the empty word, word product is the identity diagram = (1/s_id) * b_id.
+        coeffs[start_idx] = sympy.simplify(sympy.S.One / self._basis_scale(start_idx))
         words[start_idx] = "1"
 
         q = deque([start])
@@ -741,7 +790,17 @@ class DiagramAlgebra(ABC):
                 res_idx = self._basis_lookup[self._key(res)]
                 if words[res_idx] is not None:
                     continue
-                next_coeff = sympy.simplify(cur_coeff * (self.d ** loops))
+                # wordproduct' = wordproduct * gen
+                #             = (cur_coeff * b_cur) * gen
+                #             = cur_coeff * s_cur * (diagram_cur * gen)
+                #             = cur_coeff * s_cur * d^loops * diagram_res
+                #             = cur_coeff * s_cur * d^loops / s_res * b_res
+                next_coeff = sympy.simplify(
+                    cur_coeff
+                    * self._basis_scale(cur_idx)
+                    * (self.d ** loops)
+                    / self._basis_scale(res_idx)
+                )
                 next_word = name if cur_word == "1" else f"{cur_word} {name}"
                 coeffs[res_idx] = next_coeff
                 words[res_idx] = next_word
