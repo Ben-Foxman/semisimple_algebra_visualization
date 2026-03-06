@@ -154,21 +154,45 @@ def _remove_cell(part, cell):
 
 
 def _diff_cell(prev, curr):
+    """
+    If curr differs from prev by adding/removing exactly one cell, return:
+      ("add", (row, col)) or ("rem", (row, col))
+    Otherwise return None.
+
+    IMPORTANT: verify that all other rows are unchanged; otherwise partitions like
+    prev=(1,1,1), curr=(2,) could be misidentified as a one-cell move.
+    """
+    max_len = max(len(curr), len(prev))
     if _partition_size(curr) == _partition_size(prev) + 1:
-        # added
-        for i in range(max(len(curr), len(prev))):
+        diff_row = None
+        for i in range(max_len):
             prev_len = prev[i] if i < len(prev) else 0
             curr_len = curr[i] if i < len(curr) else 0
-            if curr_len == prev_len + 1:
-                return ("add", (i + 1, curr_len))
-        return None
+            if curr_len == prev_len:
+                continue
+            if curr_len == prev_len + 1 and diff_row is None:
+                diff_row = i
+                continue
+            return None
+        if diff_row is None:
+            return None
+        return ("add", (diff_row + 1, curr[diff_row] if diff_row < len(curr) else 1))
+
     if _partition_size(curr) + 1 == _partition_size(prev):
-        for i in range(max(len(curr), len(prev))):
+        diff_row = None
+        for i in range(max_len):
             prev_len = prev[i] if i < len(prev) else 0
             curr_len = curr[i] if i < len(curr) else 0
-            if prev_len == curr_len + 1:
-                return ("rem", (i + 1, prev_len))
-        return None
+            if curr_len == prev_len:
+                continue
+            if prev_len == curr_len + 1 and diff_row is None:
+                diff_row = i
+                continue
+            return None
+        if diff_row is None:
+            return None
+        return ("rem", (diff_row + 1, prev[diff_row] if diff_row < len(prev) else 1))
+
     return None
 
 
@@ -247,7 +271,7 @@ class DiagramAlgebra(ABC):
     """
 
     algebra_id = "diagram"
-    cache_version = "v35"
+    cache_version = "v36"
 
     def __init__(self, k, d=5, symbolic_d=False):
         self.k = k
