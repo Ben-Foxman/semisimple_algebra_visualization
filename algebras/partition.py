@@ -664,6 +664,89 @@ class PartitionAlgebra(DiagramAlgebra):
             ]
         )
 
+    def _pa_rank1_vector_from_scaled_projector(self, P):
+        n = P.rows
+        Z = sympy.zeros(n, n)
+        d = sympy.sympify(self.d)
+
+        if P == Z or self._matrix_has_nonfinite(P):
+            return None
+        if sympy.simplify(P - P.T) != Z:
+            return None
+        if sympy.simplify(P * P - d * P) != Z:
+            return None
+
+        for j in range(n):
+            diag = sympy.simplify(P[j, j])
+            if diag == 0:
+                continue
+            col = P[:, j]
+            recon = sympy.simplify((col * col.T) / diag)
+            if sympy.simplify(recon - P) == Z:
+                return sympy.simplify(col / sympy.sqrt(d * diag))
+        return None
+
+    def _pa_s_block_from_projector_geometry(self, p_i, p_ip1, b_i, sigma_hint=None):
+        if getattr(self, "is_symbolic_d", False):
+            return None
+
+        n = p_i.rows
+        Z = sympy.zeros(n, n)
+        I = sympy.eye(n)
+
+        if (
+            self._matrix_has_nonfinite(p_i)
+            or self._matrix_has_nonfinite(p_ip1)
+            or self._matrix_has_nonfinite(b_i)
+        ):
+            return None
+        if sympy.simplify(b_i - b_i.T) != Z or sympy.simplify(b_i * b_i - b_i) != Z:
+            return None
+
+        u = self._pa_rank1_vector_from_scaled_projector(p_i)
+        v = self._pa_rank1_vector_from_scaled_projector(p_ip1)
+        if u is None or v is None:
+            return None
+
+        K = sympy.simplify(I - b_i)
+        candidates = []
+
+        for sign in (sympy.S.One, -sympy.S.One):
+            v_signed = sympy.simplify(sign * v)
+            if sympy.simplify(b_i * u - b_i * v_signed) != sympy.zeros(n, 1):
+                continue
+            w = sympy.simplify(K * (u - v_signed))
+            if w == sympy.zeros(n, 1):
+                H = I
+            else:
+                denom = sympy.simplify((w.T * w)[0])
+                if denom == 0:
+                    continue
+                H = sympy.simplify(I - sympy.Integer(2) * (w * w.T) / denom)
+            if not self._matrix_has_nonfinite(H) and self._pa_check_s_relations(
+                H, p_i, p_ip1, b_i
+            ):
+                candidates.append(H)
+
+        if not candidates:
+            return None
+
+        if sigma_hint is not None and not self._matrix_has_nonfinite(sigma_hint):
+            def _score(M):
+                diff = sympy.simplify(M - sigma_hint)
+                total = 0.0
+                for i in range(n):
+                    for j in range(n):
+                        try:
+                            total += abs(float(sympy.N(diff[i, j], 50)))
+                        except Exception:
+                            total += 1.0
+                return total
+
+            candidates.sort(key=_score)
+
+        return candidates[0]
+
     def _pa_s_block_from_relations_augmented(self, p_i, p_ip1, b_i, sigma_hint=None):
         n = p_i.rows
         vars_ = sympy.symbols(f"sa0:{n * n}")
@@ -769,10 +852,34 @@ class PartitionAlgebra(DiagramAlgebra):
                     seeds.append(pat)
             if hint_seed not in seeds:
                 seeds.append(hint_seed)
+            eq_candidates = sorted(
+                invol_eqs,
+                key=lambda expr: (
+                    len(expr.free_symbols),
+                    int(expr.count_ops()) if hasattr(expr, "count_ops") else 0,
+                ),
+            )
+            nsolve_eqs = []
+            covered = set()
+            for expr in eq_candidates:
+                if len(nsolve_eqs) >= len(free_vars):
+                    break
+                nsolve_eqs.append(expr)
+                covered.update(expr.free_symbols & set(free_vars))
+            if covered != set(free_vars):
+                for expr in eq_candidates:
+                    if expr in nsolve_eqs:
+                        continue
+                    nsolve_eqs.append(expr)
+                    covered.update(expr.free_symbols & set(free_vars))
+                    if len(nsolve_eqs) >= len(free_vars) and covered == set(free_vars):
+                        break
+            if not nsolve_eqs:
+                nsolve_eqs = invol_eqs[: len(free_vars)]
             for seed in seeds[:4]:
                 try:
                     sol_num = sympy.nsolve(
-                        invol_eqs,
+                        nsolve_eqs,
                         free_vars,
                         seed,
                         tol=1e-24,
@@ -875,16 +982,25 @@ class PartitionAlgebra(DiagramAlgebra):
             p_next_block = p_ip1.extract(comp, comp)
             b_block = b_i.extract(comp, comp)
             sigma_block = sigma_candidate.extract(comp, comp) if sigma_candidate is not None else None
-            solved = self._pa_s_block_from_relations_augmented(
+            block = self._pa_s_block_from_projector_geometry(
                 p_block,
                 p_next_block,
                 b_block,
                 sigma_hint=sigma_block,
             )
-            if solved is not None:
-                block = solved
-            else:
-                block = sigma_block if sigma_block is not None else sympy.eye(size)
+            if block is None:
+                block = self._pa_s_block_from_relations_augmented(
+                    p_block,
+                    p_next_block,
+                    b_block,
+                    sigma_hint=sigma_block,
+                )
+            if block is None and sigma_block is not None and not self._matrix_has_nonfinite(
+                sigma_block
+            ):
+                block = sigma_block
+            if block is None:
+                block = sympy.eye(size)
             for a, ia in enumerate(comp):
                 for b, ib in enumerate(comp):
                     S[ia, ib] = block[a, b]

@@ -1809,59 +1809,6 @@ class AlgebraGui(QtWidgets.QMainWindow):
             norm_text = "Norm: (unavailable)."
             if norm_val is not None:
                 norm_text = f"Norm: {norm_val:.10f}"
-
-            approx_val = None
-            approx_expr_label = None
-            # Show the Schur-multiplicity heuristic value sqrt(m_rho)/d^{n/2} where applicable.
-            try:
-                if self._d_is_symbolic():
-                    approx_val = None
-                else:
-                    d_val = self.algebra.d
-                    d_float = _safe_float(sympy.N(d_val, 50))
-                    if d_float is not None and d_float > 0:
-                        # Map this row to its irrep.
-                        irrep_idx = None
-                        if getattr(self, "_units_label_keys", None):
-                            irrep_idx = self._units_label_keys[row_a][0]
-                        if irrep_idx is not None and 0 <= irrep_idx < len(self.algebra.irreps):
-                            ir = self.algebra.irreps[irrep_idx]
-                            # Extract the partition label rho from the irrep shape.
-                            rho = None
-                            if isinstance(self.algebra, PartitionAlgebra):
-                                rho = ir[0] if isinstance(ir, tuple) and len(ir) == 2 else None
-                                m_rho = _m_rho_partition(tuple(rho), d_val) if rho is not None else None
-                            elif isinstance(self.algebra, HalfPartitionAlgebra):
-                                rho = ir[0] if isinstance(ir, tuple) and len(ir) == 2 else None
-                                m_rho = _m_rho_half_partition(tuple(rho), d_val) if rho is not None else None
-                            elif isinstance(self.algebra, BrauerAlgebra):
-                                rho = ir if isinstance(ir, tuple) else None
-                                m_rho = _m_rho_brauer(tuple(rho), d_val) if rho is not None else None
-                            elif isinstance(self.algebra, WalledBrauerAlgebra):
-                                if isinstance(ir, tuple) and len(ir) == 2:
-                                    left, right = ir
-                                    d_int = int(d_float)
-                                    m_rho = _m_rho_walled_brauer(tuple(left), tuple(right), d_int, int(self.algebra.r), int(self.algebra.s))
-                                else:
-                                    m_rho = None
-                            else:
-                                m_rho = None
-
-                            if m_rho is not None:
-                                if isinstance(self.algebra, HalfPartitionAlgebra):
-                                    n_eff = sympy.Rational(int(self.algebra.k), 2)
-                                else:
-                                    n_eff = sympy.Rational(int(self.algebra.k), 2)
-                                denom = sympy.N(d_val ** n_eff, 50)
-                                if denom != 0:
-                                    approx_expr = sympy.sqrt(sympy.N(m_rho, 50)) / denom
-                                    approx_val = _safe_float(sympy.N(approx_expr, 50))
-                                    approx_expr_label = "sqrt(m_rho)/d^{n/2}"
-            except Exception:
-                approx_val = None
-
-            if approx_val is not None:
-                norm_text = f"{norm_text}  (approx {approx_expr_label} ≈ {approx_val:.10f})"
             norm_text = f"{norm_text}."
             label_a = unit_labels[row_a]
             self.units_angle_label.setText(f"{label_a} — {norm_text}")

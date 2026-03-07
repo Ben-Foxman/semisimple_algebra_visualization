@@ -280,7 +280,7 @@ class DiagramAlgebra(ABC):
     """
 
     algebra_id = "diagram"
-    cache_version = "v52"
+    cache_version = "v54"
 
     def __init__(self, k, d=5, symbolic_d=False):
         self.k = k
@@ -494,7 +494,9 @@ class DiagramAlgebra(ABC):
         gram_data = data.get("gram_matrix")
         if isinstance(gram_data, list):
             rows = [[self._deserialize_coeff(c) for c in row] for row in gram_data]
-            self._gram_matrix_cache = sympy.Matrix(rows)
+            gram = sympy.Matrix(rows)
+            if not self._container_has_nonfinite(gram):
+                self._gram_matrix_cache = gram
 
         dual_data = data.get("dual_basis")
         if isinstance(dual_data, list):
@@ -502,7 +504,8 @@ class DiagramAlgebra(ABC):
             for row in dual_data:
                 entry = {int(j): self._deserialize_coeff(c) for j, c in row.items()}
                 dual.append(entry)
-            self._dual_basis_cache = dual
+            if not self._container_has_nonfinite(dual):
+                self._dual_basis_cache = dual
 
         units_data = data.get("matrix_units")
         if isinstance(units_data, list):
@@ -510,7 +513,8 @@ class DiagramAlgebra(ABC):
             for row in units_data:
                 entry = {int(j): self._deserialize_coeff(c) for j, c in row.items()}
                 units.append(entry)
-            self._matrix_units_cache = units
+            if not self._container_has_nonfinite(units):
+                self._matrix_units_cache = units
 
         unit_labels = data.get("matrix_unit_labels")
         if isinstance(unit_labels, list):
@@ -535,15 +539,38 @@ class DiagramAlgebra(ABC):
 
         irrep_mats = data.get("irrep_matrices")
         if isinstance(irrep_mats, list):
-            self._irrep_matrices_cache = []
+            mats_cache = []
             for entry in irrep_mats:
                 if isinstance(entry, dict):
                     mats = {
                         k: self._deserialize_matrix(v) for k, v in entry.items()
                     }
-                    self._irrep_matrices_cache.append(mats)
+                    mats_cache.append(mats)
+            if not self._container_has_nonfinite(mats_cache):
+                self._irrep_matrices_cache = mats_cache
 
         return True
+
+    def _expr_has_nonfinite(self, expr):
+        try:
+            return (
+                expr.has(sympy.nan)
+                or expr.has(sympy.zoo)
+                or expr.has(sympy.oo)
+                or expr.has(-sympy.oo)
+            )
+        except Exception:
+            text = str(expr).lower()
+            return text in {"nan", "zoo", "oo", "-oo"}
+
+    def _container_has_nonfinite(self, obj):
+        if isinstance(obj, sympy.MatrixBase):
+            return any(self._expr_has_nonfinite(x) for x in obj)
+        if isinstance(obj, dict):
+            return any(self._container_has_nonfinite(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return any(self._container_has_nonfinite(v) for v in obj)
+        return self._expr_has_nonfinite(obj)
 
     def _save_cache(self):
         cache_dir, path = self._cache_path()
