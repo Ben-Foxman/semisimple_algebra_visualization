@@ -203,7 +203,7 @@ class HalfPartitionAlgebra(PartitionAlgebra):
 
         def rec(level, part, path):
             if level == top_level:
-                all_paths[path[-1]].append(path[:])
+                all_paths[path[-1]].append(tuple(path))
                 return
             if level % 2 == 0:
                 # even -> odd: stay or remove
@@ -222,14 +222,9 @@ class HalfPartitionAlgebra(PartitionAlgebra):
 
         rec(0, tuple(), [node_for(0, tuple())])
 
-        # At level 2k+1, floor(level/2)=k, so l = k - |λ|, hence |λ| <= k.
-        for l in range(k + 1):
-            size = k - l
-            for part in _partitions_of(size):
-                key = (part, l)
-                if key in all_paths:
-                    irreps.append(key)
-                    paths_by_irrep.append(all_paths[key])
+        for key in sorted(all_paths.keys(), key=self._pa_irrep_sort_key):
+            irreps.append(key)
+            paths_by_irrep.append(all_paths[key])
 
         for paths in paths_by_irrep:
             paths.sort(key=_path_lex_key)
@@ -242,7 +237,7 @@ class HalfPartitionAlgebra(PartitionAlgebra):
         That matches generators:
            p_i = e_{2i-1} for i<=k
            b_i = e_{2i}   for i<=k
-           s_i computed for i<=k-1
+           s_i = sigma_{2i} sigma_{2i+1} for i<=k-1
         """
         irreps = self.irreps
         paths = self.bratteli_paths
@@ -263,26 +258,47 @@ class HalfPartitionAlgebra(PartitionAlgebra):
                         M_e[a, b] = self._pa_e(s_path, t_path, idx)
                 e_mats[idx] = M_e
 
-            # generator mats (seminormal)
+            # generator mats (seminormal): p_i, b_i
             gen_mats_semi = {}
             for i in range(1, self.k_int + 1):
                 gen_mats_semi[f"p_{i}"] = e_mats[2 * i - 1]
                 gen_mats_semi[f"b_{i}"] = e_mats[2 * i]
 
-            # orthogonalize from p_i,b_i
+            # Recover the orthogonal basis scaling from the Hermitian p_i / b_i blocks.
             norms = self._pa_norms_from_seminormal(gen_mats_semi)
+            norms_by_path = {p: norms[i] for i, p in enumerate(basis_paths)}
+
             gen_mats = {}
             for name, M_semi in gen_mats_semi.items():
                 gen_mats[name] = self._orthogonalize_generator_matrix(M_semi, norms)
 
-            # Solve for s_i (i=1..k-1) using relations with p_i,p_{i+1},b_i
+            # Compute sigma_k (seminormal) then orthogonalize, and form s_i = sigma_{2i} sigma_{2i+1}.
+            # Need sigma indices up to 2k-1 (since s_{k-1} uses sigma_{2k-2}, sigma_{2k-1}).
+            sigma_orth = {}
+            for k_idx in range(2, 2 * self.k_int):  # up to 2k-1
+                M_sigma_semi = sympy.zeros(n, n)
+                for a, s_path in enumerate(basis_paths):
+                    for b, t_path in enumerate(basis_paths):
+                        M_sigma_semi[a, b] = self._pa_sigma(
+                            s_path, t_path, k_idx, basis_paths, norms_by_path=norms_by_path
+                        )
+                sigma_orth[k_idx] = self._orthogonalize_generator_matrix(M_sigma_semi, norms)
+
             for i in range(1, self.k_int):
-                S = self._pa_s_from_relations(
-                    gen_mats[f"p_{i}"], gen_mats[f"p_{i + 1}"], gen_mats[f"b_{i}"]
-                )
-                if S is None:
-                    S = sympy.eye(n)
-                gen_mats[f"s_{i}"] = sympy.simplify(S)
+                s_from_sigma = sympy.simplify(sigma_orth[2 * i] * sigma_orth[2 * i + 1])
+                p_i = gen_mats[f"p_{i}"]
+                p_ip1 = gen_mats[f"p_{i + 1}"]
+                b_i = gen_mats[f"b_{i}"]
+                s_local = self._pa_s_from_local_models(p_i, p_ip1, b_i, s_from_sigma)
+                if self._pa_check_s_relations(s_local, p_i, p_ip1, b_i):
+                    s_from_sigma = s_local
+                elif self._matrix_has_nonfinite(s_from_sigma) or not self._pa_check_s_relations(s_from_sigma, p_i, p_ip1, b_i):
+                    s_from_rel = self._pa_s_from_relations(
+                        p_i, p_ip1, b_i
+                    )
+                    if s_from_rel is not None:
+                        s_from_sigma = sympy.simplify(s_from_rel)
+                gen_mats[f"s_{i}"] = s_from_sigma
 
             matrices.append(gen_mats)
 

@@ -345,6 +345,132 @@ def _numeric_value(expr):
     return _safe_float(sympy.N(expr))
 
 
+def _partition_size(part: Tuple[int, ...]) -> int:
+    return int(sum(int(x) for x in part)) if part else 0
+
+
+def _partition_conjugate(part: Tuple[int, ...]) -> List[int]:
+    if not part:
+        return []
+    max_col = max(part)
+    return [sum(1 for r in part if r >= j) for j in range(1, max_col + 1)]
+
+
+def _hook_product(part: Tuple[int, ...]) -> sympy.Expr:
+    """
+    Product of hook lengths over all boxes of a partition `part`.
+    `part` is a tuple of row lengths in weakly decreasing order.
+    """
+    if not part:
+        return sympy.S.One
+    conj = _partition_conjugate(part)
+    prod = sympy.S.One
+    for i, row_len in enumerate(part, start=1):
+        for j in range(1, int(row_len) + 1):
+            hook = (row_len - j) + (conj[j - 1] - i) + 1
+            prod *= sympy.Integer(hook)
+    return sympy.simplify(prod)
+
+
+def _m_rho_partition(part: Tuple[int, ...], d_val) -> sympy.Expr:
+    """
+    Schur multiplicity m_rho for the partition algebra P_n(d) (Halverson–Ram, Prop 3.24).
+    Implements the formula provided by the user:
+      m_rho = (∏_{b in rho} 1/h(b)) * ∏_{j=1}^{ℓ(rho)} (d - |rho| - rho_j + j),
+    where |rho| is the number of boxes and ℓ(rho) is the number of nonzero parts.
+    """
+    size = _partition_size(part)
+    hook_prod = _hook_product(part)
+    term = sympy.S.One
+    # IMPORTANT: the product is over j=1..|rho|; for j>ℓ(rho) we use rho_j = 0.
+    # This matters already for rho=(2,) where |rho|=2 but ℓ(rho)=1.
+    for j in range(1, size + 1):
+        rho_j = int(part[j - 1]) if j <= len(part) else 0
+        term *= (d_val - size - sympy.Integer(rho_j) + sympy.Integer(j))
+    return sympy.simplify(term / hook_prod)
+
+
+def _m_rho_half_partition(part: Tuple[int, ...], d_val) -> sympy.Expr:
+    """
+    Schur multiplicity m_rho for the half-partition algebra P_{n+1/2}(d)
+    (Halverson–Ram, Prop 3.24), using the formula provided by the user:
+      m_rho = (∏_{b in rho} 1/h(b)) * d * ∏_{j=1}^{ℓ(rho)} (d - 1 - |rho| - rho_j + j).
+    """
+    size = _partition_size(part)
+    hook_prod = _hook_product(part)
+    term = sympy.S.One
+    # IMPORTANT: the product is over j=1..|rho|; for j>ℓ(rho) we use rho_j = 0.
+    for j in range(1, size + 1):
+        rho_j = int(part[j - 1]) if j <= len(part) else 0
+        term *= (d_val - 1 - size - sympy.Integer(rho_j) + sympy.Integer(j))
+    return sympy.simplify(d_val * term / hook_prod)
+
+
+def _d_box_molev(part: Tuple[int, ...], i: int, j: int) -> int:
+    """
+    Molev–Rozhkovskaya (3.15) d(i,j) for a box (i,j) in a Young diagram.
+    `part` is a partition; i=row index (1-based), j=column index (1-based).
+    """
+    lam_i = part[i - 1] if 1 <= i <= len(part) else 0
+    lam_j = part[j - 1] if 1 <= j <= len(part) else 0
+    conj = _partition_conjugate(part)
+    lam_ip = conj[i - 1] if 1 <= i <= len(conj) else 0
+    lam_jp = conj[j - 1] if 1 <= j <= len(conj) else 0
+    if i <= j:
+        return int(lam_i + lam_j - i - j + 1)
+    return int(-lam_ip - lam_jp + i + j - 1)
+
+
+def _m_rho_brauer(part: Tuple[int, ...], d_val) -> sympy.Expr:
+    """
+    Schur multiplicity-like factor (hook dimension formula form) for Brauer algebra,
+    using the user-provided specialization:
+      m_rho = (∏_{b in rho} 1/h(b)) * ∏_{(i,j) in rho} (d - 1 + d(i,j)),
+    where d(i,j) is defined as in Molev–Rozhkovskaya (3.15).
+    """
+    hook_prod = _hook_product(part)
+    term = sympy.S.One
+    for i, row_len in enumerate(part, start=1):
+        for j in range(1, int(row_len) + 1):
+            term *= (d_val - 1 + sympy.Integer(_d_box_molev(part, i, j)))
+    return sympy.simplify(term / hook_prod)
+
+
+def _m_rho_walled_brauer(left: Tuple[int, ...], right: Tuple[int, ...], d_int: int, r: int, s: int) -> sympy.Expr:
+    """
+    Efficient multiplicity computation for walled Brauer as in the user's simplified formula.
+    Assumes d_int is an integer dimension parameter with d_int >= r+s.
+    """
+    lam = left
+    mu = right
+
+    def part_val(p, idx_1based):
+        return sympy.Integer(p[idx_1based - 1]) if 1 <= idx_1based <= len(p) else sympy.Integer(0)
+
+    out = sympy.S.One
+    # (1) left hook-like GL factor
+    for i in range(1, r + 1):
+        for j in range(i + 1, r + 1):
+            out *= (part_val(lam, i) - part_val(lam, j) + (j - i)) / sympy.Integer(j - i)
+    # (2) right hook-like GL factor
+    for i in range(1, s + 1):
+        for j in range(i + 1, s + 1):
+            out *= (part_val(mu, i) - part_val(mu, j) + (j - i)) / sympy.Integer(j - i)
+    # (3) cross term
+    for i in range(1, r + 1):
+        for j in range(1, s + 1):
+            out *= (part_val(lam, i) + part_val(mu, j) + d_int - i - j + 1) / sympy.Integer(d_int - i - j + 1)
+    # (4) and (5) rising-factorial terms (implemented as written; typically small when r+s ~ n)
+    m = d_int - r - s
+    for i in range(1, r + 1):
+        for t in range(1, m + 1):
+            out *= (part_val(lam, i) + r + t - i) / sympy.Integer(r + t - i)
+    for j in range(1, s + 1):
+        for t in range(1, m + 1):
+            out *= (part_val(mu, j) + s + t - j) / sympy.Integer(s + t - j)
+    return sympy.simplify(out)
+
+
 def compute_order_numeric(matrix, ascending=True):
     n = len(matrix)
     scores = []
@@ -661,10 +787,6 @@ class AlgebraGui(QtWidgets.QMainWindow):
         row1.addWidget(QtWidgets.QLabel("d:"))
         row1.addWidget(self.d_spin)
 
-        self.symbolic_d_checkbox = QtWidgets.QCheckBox("Symbolic d")
-        self.symbolic_d_checkbox.setChecked(False)
-        row1.addWidget(self.symbolic_d_checkbox)
-
         self.load_button = QtWidgets.QPushButton("Load")
         row1.addWidget(self.load_button)
         row1.addStretch()
@@ -693,6 +815,13 @@ class AlgebraGui(QtWidgets.QMainWindow):
         self.label_selector.addItems(["diagram", "label"])
         row2.addWidget(QtWidgets.QLabel("Row/Col Labels:"))
         row2.addWidget(self.label_selector)
+
+        self.decimals_spin = QtWidgets.QSpinBox()
+        self.decimals_spin.setMinimum(0)
+        self.decimals_spin.setMaximum(50)
+        self.decimals_spin.setValue(5)
+        row2.addWidget(QtWidgets.QLabel("Decimals:"))
+        row2.addWidget(self.decimals_spin)
         row2.addStretch()
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -763,6 +892,10 @@ class AlgebraGui(QtWidgets.QMainWindow):
         controls.addWidget(QtWidgets.QLabel("Elements:"))
         controls.addWidget(self.element_selector)
 
+        self.normalize_basis_checkbox = QtWidgets.QCheckBox("Normalize basis elements")
+        self.normalize_basis_checkbox.setChecked(False)
+        controls.addWidget(self.normalize_basis_checkbox)
+
         self.prev_btn = QtWidgets.QPushButton("Prev")
         self.next_btn = QtWidgets.QPushButton("Next")
         controls.addWidget(self.prev_btn)
@@ -795,9 +928,10 @@ class AlgebraGui(QtWidgets.QMainWindow):
         self.display_selector.currentTextChanged.connect(self._refresh_visibility)
         self.order_only_checkbox.stateChanged.connect(self._refresh_tables)
         self.label_selector.currentTextChanged.connect(self._refresh_tables)
-        self.symbolic_d_checkbox.toggled.connect(self._refresh_d_controls)
+        self.decimals_spin.valueChanged.connect(self._refresh_after_format_change)
         self.irrep_selector.currentTextChanged.connect(self._reset_matrix_list)
         self.element_selector.currentTextChanged.connect(self._reset_matrix_list)
+        self.normalize_basis_checkbox.toggled.connect(self._reset_matrix_list)
         self.element_list.currentTextChanged.connect(self._show_matrix_for_label)
         self.prev_btn.clicked.connect(lambda: self._change_page(-1))
         self.next_btn.clicked.connect(lambda: self._change_page(1))
@@ -821,40 +955,30 @@ class AlgebraGui(QtWidgets.QMainWindow):
             self.s_spin.hide()
 
     def _refresh_d_controls(self):
-        is_symbolic = self.symbolic_d_checkbox.isChecked()
-        self.d_spin.setEnabled(not is_symbolic)
-        self.order_only_checkbox.setVisible(is_symbolic)
-        if not is_symbolic:
-            self.order_only_checkbox.setChecked(False)
+        self.d_spin.setEnabled(True)
+        self.order_only_checkbox.setChecked(False)
+        self.order_only_checkbox.setVisible(False)
 
     def _d_is_symbolic(self):
-        if self.algebra is not None:
-            return getattr(self.algebra, "is_symbolic_d", True)
-        return self.symbolic_d_checkbox.isChecked()
+        return False
 
     def load_algebra(self):
         alg = self.algebra_selector.currentText()
-        symbolic_d = self.symbolic_d_checkbox.isChecked()
-        d_value = None if symbolic_d else self.d_spin.value()
+        d_value = self.d_spin.value()
         if alg == "partition":
-            self.algebra = PartitionAlgebra(self.k_spin.value(), d=d_value, symbolic_d=symbolic_d)
+            self.algebra = PartitionAlgebra(self.k_spin.value(), d=d_value)
         elif alg == "half_partition":
-            self.algebra = HalfPartitionAlgebra(self.k_spin.value(), d=d_value, symbolic_d=symbolic_d)
+            self.algebra = HalfPartitionAlgebra(self.k_spin.value(), d=d_value)
         elif alg == "brauer":
-            self.algebra = BrauerAlgebra(
-                self.k_spin.value(), d=d_value, symbolic_d=symbolic_d
-            )
+            self.algebra = BrauerAlgebra(self.k_spin.value(), d=d_value)
         elif alg == "walled_brauer":
             self.algebra = WalledBrauerAlgebra(
                 self.r_spin.value(),
                 self.s_spin.value(),
                 d=d_value,
-                symbolic_d=symbolic_d,
             )
         else:
-            self.algebra = SymmetricGroupAlgebra(
-                self.k_spin.value(), d=d_value, symbolic_d=symbolic_d
-            )
+            self.algebra = SymmetricGroupAlgebra(self.k_spin.value(), d=d_value)
 
         self.renderer = DiagramRenderer(self.algebra.k)
         self._populate_gram_matrix()
@@ -926,6 +1050,14 @@ class AlgebraGui(QtWidgets.QMainWindow):
         elif mode == "fourier basis states":
             self._populate_matrix_units()
 
+    def _refresh_after_format_change(self):
+        self._refresh_tables()
+        # If the irrep matrix viewer is showing a matrix, re-render its text too.
+        if self.irrep_scroll.isVisible():
+            current = self.element_list.currentItem()
+            if current is not None:
+                self._show_matrix_for_label(current.text())
+
     def _compute_gram_matrix_S(self):
         """
         Compute (and cache) the diagram-basis Gram matrix for the inner product
@@ -935,7 +1067,7 @@ class AlgebraGui(QtWidgets.QMainWindow):
         alg = self.algebra
         if alg is None:
             return []
-        key = (alg.algebra_id, alg.k, str(alg.d), bool(getattr(alg, "is_symbolic_d", False)))
+        key = (alg.algebra_id, alg.k, str(alg.d), False)
         if key == self._gram_S_cache_key and self._gram_S_cache_matrix is not None:
             return self._gram_S_cache_matrix
 
@@ -1199,9 +1331,9 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
     def _populate_approx_fourier_transform(self):
         """
-        Display the approximate Fourier transform \\tilde{F}_A defined by
+        Display the (diagram-basis) Fourier transform \\tilde{F}_A defined by
 
-          \\tilde{F}_A |a> = sum_{rho,i,j} ||E_{ij}^rho||_2 * rho(a)_{ij} |rho,i,j>
+          (\\tilde{F}_A |a>)_{(rho,i,j)} = d_rho * rho(a^*)_{j,i} / ||E_{ij}^rho||_2
 
         where ||.||_2 is the Euclidean norm with respect to the computational basis
         used throughout the app (same normalization as the matrix_units view).
@@ -1219,14 +1351,10 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
         if n > 120:
             self.units_warning_label.setText(
-                f"approx_ft: dim={n} is large; this view is disabled to avoid freezing."
+                f"approx_ft: dim={n} is large; computing may take a while."
             )
-            self.gram_table.clear()
-            self.gram_table.setRowCount(0)
-            self.gram_table.setColumnCount(0)
-            return
-
-        self.units_warning_label.setText("")
+        else:
+            self.units_warning_label.setText("")
 
         basis = alg.basis
         basis_labels = [alg.label_of(b) for b in basis]
@@ -1242,10 +1370,12 @@ class AlgebraGui(QtWidgets.QMainWindow):
         row_order = list(range(n))
 
         units = alg.matrix_units
-        norm_sq = [sympy.simplify(sum(c * c for c in u.values())) for u in units]
+        simplify = sympy.simplify if self._d_is_symbolic() else (lambda x: x)
+        norm_sq = [simplify(sum(c * c for c in u.values())) for u in units]
         norms = [sympy.sqrt(x) for x in norm_sq]
 
         basis_words = alg._basis_words_with_loop_powers()
+        dual = alg.dual_basis
 
         T = [[sympy.S.Zero for _ in range(n)] for _ in range(n)]
 
@@ -1255,17 +1385,24 @@ class AlgebraGui(QtWidgets.QMainWindow):
             rho_basis = []
             for coeff, word in basis_words:
                 M = alg.irrep_matrix_for_label(irrep_idx, word)
-                rho_basis.append(sympy.simplify(M / coeff))
+                rho_basis.append(simplify(M / coeff))
 
             base_col = sum(len(p) ** 2 for p in alg.bratteli_paths[:irrep_idx])
-            for i in range(d_rho):
-                for j in range(d_rho):
-                    col = base_col + i * d_rho + j
-                    factor = norms[col]
-                    for a_idx in range(n):
-                        T[a_idx][col] = sympy.simplify(
-                            factor * rho_basis[a_idx][i, j]
-                        )
+            for a_idx in range(n):
+                # a^* = sum_b dual[a][b] * b  (dual basis w.r.t. the app's Gram product)
+                rho_a_star = sympy.zeros(d_rho, d_rho)
+                for b_idx, coeff in dual[a_idx].items():
+                    rho_a_star += coeff * rho_basis[b_idx]
+                for i in range(d_rho):
+                    for j in range(d_rho):
+                        col = base_col + i * d_rho + j
+                        denom = norms[col]
+                        if denom == 0:
+                            T[a_idx][col] = sympy.S.Zero
+                        else:
+                            T[a_idx][col] = simplify(
+                                sympy.S(d_rho) * rho_a_star[j, i] / denom
+                            )
 
         # Populate table.
         self.gram_table.clear()
@@ -1526,6 +1663,7 @@ class AlgebraGui(QtWidgets.QMainWindow):
             for i in range(len(paths)):
                 for j in range(len(paths)):
                     unit_label_keys.append((irrep_idx, i, j))
+        self._units_label_keys = unit_label_keys
         row_order = sorted(range(n), key=lambda idx: unit_label_keys[idx])
         self._units_row_order = row_order
         self._units_col_order = col_order
@@ -1667,16 +1805,64 @@ class AlgebraGui(QtWidgets.QMainWindow):
         norm_a = sympy.sqrt(norm_sq_a)
 
         if len(selected) == 1:
-            norm_display = norm_sq_a
-            approx_text = ""
-            if norm_display.is_number:
-                # keep exact form if possible, but also show a float approx
-                norm_display = sympy.nsimplify(norm_display, rational=True)
-                approx_val = _safe_float(sympy.N(norm_sq_a))
-                if approx_val is not None:
-                    approx_text = f" ({approx_val:.10f})"
+            norm_val = _safe_float(sympy.N(norm_a, 50))
+            norm_text = "Norm: (unavailable)."
+            if norm_val is not None:
+                norm_text = f"Norm: {norm_val:.10f}"
 
-            norm_text = f"Norm^2: {format_expr(norm_display)}{approx_text}."
+            approx_val = None
+            approx_expr_label = None
+            # Show the Schur-multiplicity heuristic value sqrt(m_rho)/d^{n/2} where applicable.
+            try:
+                if self._d_is_symbolic():
+                    approx_val = None
+                else:
+                    d_val = self.algebra.d
+                    d_float = _safe_float(sympy.N(d_val, 50))
+                    if d_float is not None and d_float > 0:
+                        # Map this row to its irrep.
+                        irrep_idx = None
+                        if getattr(self, "_units_label_keys", None):
+                            irrep_idx = self._units_label_keys[row_a][0]
+                        if irrep_idx is not None and 0 <= irrep_idx < len(self.algebra.irreps):
+                            ir = self.algebra.irreps[irrep_idx]
+                            # Extract the partition label rho from the irrep shape.
+                            rho = None
+                            if isinstance(self.algebra, PartitionAlgebra):
+                                rho = ir[0] if isinstance(ir, tuple) and len(ir) == 2 else None
+                                m_rho = _m_rho_partition(tuple(rho), d_val) if rho is not None else None
+                            elif isinstance(self.algebra, HalfPartitionAlgebra):
+                                rho = ir[0] if isinstance(ir, tuple) and len(ir) == 2 else None
+                                m_rho = _m_rho_half_partition(tuple(rho), d_val) if rho is not None else None
+                            elif isinstance(self.algebra, BrauerAlgebra):
+                                rho = ir if isinstance(ir, tuple) else None
+                                m_rho = _m_rho_brauer(tuple(rho), d_val) if rho is not None else None
+                            elif isinstance(self.algebra, WalledBrauerAlgebra):
+                                if isinstance(ir, tuple) and len(ir) == 2:
+                                    left, right = ir
+                                    d_int = int(d_float)
+                                    m_rho = _m_rho_walled_brauer(tuple(left), tuple(right), d_int, int(self.algebra.r), int(self.algebra.s))
+                                else:
+                                    m_rho = None
+                            else:
+                                m_rho = None
+
+                            if m_rho is not None:
+                                if isinstance(self.algebra, HalfPartitionAlgebra):
+                                    n_eff = sympy.Rational(int(self.algebra.k), 2)
+                                else:
+                                    n_eff = sympy.Rational(int(self.algebra.k), 2)
+                                denom = sympy.N(d_val ** n_eff, 50)
+                                if denom != 0:
+                                    approx_expr = sympy.sqrt(sympy.N(m_rho, 50)) / denom
+                                    approx_val = _safe_float(sympy.N(approx_expr, 50))
+                                    approx_expr_label = "sqrt(m_rho)/d^{n/2}"
+            except Exception:
+                approx_val = None
+
+            if approx_val is not None:
+                norm_text = f"{norm_text}  (approx {approx_expr_label} ≈ {approx_val:.10f})"
+            norm_text = f"{norm_text}."
             label_a = unit_labels[row_a]
             self.units_angle_label.setText(f"{label_a} — {norm_text}")
             return
@@ -1778,14 +1964,6 @@ class AlgebraGui(QtWidgets.QMainWindow):
         if self.algebra is None:
             return []
         mode = self.element_selector.currentText()
-        if mode == "dual basis":
-            try:
-                mats = self.algebra.irrep_matrices
-                if not mats:
-                    return []
-                return [f"{label}*" for label in sorted(mats[0].keys())]
-            except Exception:
-                return []
         if mode == "generators":
             try:
                 mats = self.algebra.irrep_matrices
@@ -1798,6 +1976,36 @@ class AlgebraGui(QtWidgets.QMainWindow):
         if mode == "dual basis":
             return [f"{label}*" for label in labels]
         return labels
+
+    def _irrep_matrix_for_basis_label(self, irrep_idx, label):
+        """
+        Return the irrep matrix for a *basis element* selected by its BFS label.
+
+        If "Normalize basis elements" is checked, interpret the label as naming a
+        computational-basis element b_a, using the word/coeff data from
+        alg._basis_words_with_loop_powers(), i.e. rho(b_a) = rho(word) / coeff.
+        Otherwise, return rho(label) as a raw word in generator matrices.
+        """
+        alg = self.algebra
+        if alg is None:
+            return None
+        if not getattr(self, "normalize_basis_checkbox", None):
+            return alg.irrep_matrix_for_label(irrep_idx, label)
+        if not self.normalize_basis_checkbox.isChecked():
+            return alg.irrep_matrix_for_label(irrep_idx, label)
+
+        labels = [alg.label_of(b) for b in alg.basis]
+        try:
+            basis_idx = labels.index(label)
+        except ValueError:
+            # If it's not a basis element label (e.g. generator), fall back.
+            return alg.irrep_matrix_for_label(irrep_idx, label)
+
+        coeff, word = alg._basis_words_with_loop_powers()[basis_idx]
+        M = alg.irrep_matrix_for_label(irrep_idx, word)
+        if coeff == 0:
+            return sympy.zeros(M.rows, M.cols)
+        return M / coeff
 
     def _dual_irrep_matrix_for_label(self, irrep_idx, label):
         alg = self.algebra
@@ -1815,14 +2023,14 @@ class AlgebraGui(QtWidgets.QMainWindow):
         for j_idx, coeff in coeffs.items():
             if coeff == 0:
                 continue
-            mat += coeff * alg.irrep_matrix_for_label(irrep_idx, labels[j_idx])
+            mat += coeff * self._irrep_matrix_for_basis_label(irrep_idx, labels[j_idx])
         return mat
 
     def _refresh_matrix_list(self):
         self.element_list.clear()
         labels = self._matrix_elements()
         self._matrix_labels = labels
-        page_size = 5
+        page_size = 25
         start = self._matrix_page * page_size
         end = start + page_size
         for label in labels[start:end]:
@@ -1839,7 +2047,7 @@ class AlgebraGui(QtWidgets.QMainWindow):
         self._refresh_matrix_list()
 
     def _change_page(self, delta):
-        page_size = 5
+        page_size = 25
         if not self._matrix_labels:
             return
         max_page = (len(self._matrix_labels) - 1) // page_size
@@ -1856,6 +2064,8 @@ class AlgebraGui(QtWidgets.QMainWindow):
                 mat = self._dual_irrep_matrix_for_label(irrep_idx, label)
                 if mat is None:
                     raise ValueError("Unknown dual basis element.")
+            elif mode == "all basis elements":
+                mat = self._irrep_matrix_for_basis_label(irrep_idx, label)
             else:
                 mat = self.algebra.irrep_matrix_for_label(irrep_idx, label)
         except Exception:
@@ -1873,14 +2083,16 @@ class AlgebraGui(QtWidgets.QMainWindow):
         self.matrix_table.setColumnCount(n)
         for i in range(n):
             for j in range(n):
-                item = QtWidgets.QTableWidgetItem(format_expr(mat[order[i], order[j]]))
+                item = QtWidgets.QTableWidgetItem(
+                    self._format_cell(mat[order[i], order[j]], self.algebra.d)
+                )
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 item.setForeground(QtGui.QBrush(QtGui.QColor("black")))
                 self.matrix_table.setItem(i, j, item)
         norm_sq = sympy.simplify(
             sum(mat[i, j] * mat[i, j] for i in range(n) for j in range(n))
         )
-        norm_text = format_expr(sympy.sqrt(norm_sq))
+        norm_text = self._format_cell(sympy.sqrt(norm_sq), self.algebra.d)
         self.matrix_norm_label.setText(f"Frobenius norm: {norm_text}")
         self.matrix_table.resizeColumnsToContents()
         self.matrix_table.resizeRowsToContents()
@@ -1916,6 +2128,43 @@ class AlgebraGui(QtWidgets.QMainWindow):
 
     def _format_cell(self, val, d_symbol):
         if not (self.order_only_checkbox.isChecked() and self._d_is_symbolic()):
+            decimals = 5
+            if hasattr(self, "decimals_spin") and self.decimals_spin is not None:
+                try:
+                    decimals = int(self.decimals_spin.value())
+                except Exception:
+                    decimals = 5
+
+            # If d is numeric, we can always display a numeric approximation.
+            # If d is symbolic, still approximate *pure numbers* (e.g. sqrt(2))
+            # rather than showing exact radicals.
+            should_approx = (not self._d_is_symbolic())
+            if self._d_is_symbolic():
+                try:
+                    should_approx = hasattr(val, "free_symbols") and not val.free_symbols
+                except Exception:
+                    should_approx = False
+
+            if should_approx:
+                # Use high precision internally, then round for display.
+                # (We avoid Python float so sqrt(2) etc stays accurate.)
+                prec = max(80, decimals + 30)
+                try:
+                    approx = sympy.N(val, prec)
+                    if approx.is_real is False:
+                        return format_expr(val)
+                    if approx.is_finite is False:
+                        return format_expr(val)
+                    if decimals <= 0:
+                        out = format(approx, ".0f")
+                    else:
+                        out = format(approx, f".{decimals}f")
+                    # Avoid displaying "-0.00000" due to tiny numerical noise.
+                    if out.startswith("-0.") and set(out[1:]) <= {"0", "."}:
+                        out = out[1:]
+                    return out
+                except Exception:
+                    pass
             return format_expr(val)
         if val == 0:
             return "0"

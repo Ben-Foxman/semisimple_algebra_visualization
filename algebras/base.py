@@ -17,6 +17,15 @@ import json
 import os
 
 import sympy
+try:
+    from sympy.polys.domains import QQ as _sympy_QQ
+    from sympy.polys.matrices import DomainMatrix as _SympyDomainMatrix
+
+    _DOMAIN_MATRIX_AVAILABLE = True
+except Exception:
+    _sympy_QQ = None
+    _SympyDomainMatrix = None
+    _DOMAIN_MATRIX_AVAILABLE = False
 
 try:
     from sage.all import SR as _sage_SR
@@ -271,7 +280,7 @@ class DiagramAlgebra(ABC):
     """
 
     algebra_id = "diagram"
-    cache_version = "v36"
+    cache_version = "v52"
 
     def __init__(self, k, d=5, symbolic_d=False):
         self.k = k
@@ -308,11 +317,11 @@ class DiagramAlgebra(ABC):
 
         We treat the computational basis element corresponding to a diagram `a` as
 
-            b_a := d^{(k - cc(a))/2} * a
+            b_a := d^{(k_eff - cc(a))/2} * a
 
         where:
           - cc(a) is the number of blocks of the set partition diagram a
-          - k is self.k
+          - k_eff is the effective "top-row size" parameter
 
         Notes:
           - For Brauer/Walled-Brauer bases (pair partitions), cc(a)=k for all basis
@@ -325,10 +334,15 @@ class DiagramAlgebra(ABC):
         b0 = self.basis[0]
         if not hasattr(b0, "blocks"):
             return [sympy.S.One for _ in range(self.dim)]
+        # Half-partition algebras P_{k+1/2} store the user parameter as `k_int`
+        # (integer part). Their diagram boundary has k_int+1 top points, so the
+        # intended normalization uses k_eff = k_int + 1.
+        k_eff = getattr(self, "k_int", None)
+        k_eff = (int(k_eff) + 1) if k_eff is not None else int(self.k)
         out = []
         for a in self.basis:
             cc = len(a.blocks)
-            out.append(sympy.simplify(self.d ** (sympy.Rational(self.k - cc, 2))))
+            out.append(sympy.simplify(self.d ** (sympy.Rational(k_eff - cc, 2))))
         return out
 
     def _basis_scale(self, basis_idx: int):
@@ -513,8 +527,9 @@ class DiagramAlgebra(ABC):
         paths_data = data.get("bratteli_paths")
         if isinstance(irreps_data, list) and isinstance(paths_data, list):
             self._irreps_cache = [self._deserialize_shape(x) for x in irreps_data]
+            # Store each path as a tuple (hashable, stable ordering).
             self._bratteli_cache = [
-                [[self._deserialize_shape(step) for step in path] for path in paths]
+                [tuple(self._deserialize_shape(step) for step in path) for path in paths]
                 for paths in paths_data
             ]
 
@@ -720,7 +735,45 @@ class DiagramAlgebra(ABC):
         """
         G = self.gram_matrix
         Gi_entries = None
-        if _sage_enabled():
+        if not getattr(self, "is_symbolic_d", False):
+            # For numeric integer d, the Gram entries lie in Q(sqrt(d)).
+            # Inverting over that exact algebraic field is much more stable than
+            # a floating inverse and fixes large errors in the dual basis/matrix units.
+            if _DOMAIN_MATRIX_AVAILABLE:
+                try:
+                    max_dim = int(os.getenv("REPTHEORY_EXACT_DUAL_MAX_DIM", "250"))
+                except Exception:
+                    max_dim = 250
+                try:
+                    d_exact = sympy.Integer(self.d)
+                except Exception:
+                    d_exact = None
+                if d_exact is not None and G.rows <= max_dim:
+                    try:
+                        alpha = sympy.sqrt(d_exact)
+                        field = _sympy_QQ.algebraic_field(alpha)
+                        rows = [
+                            [field.from_sympy(G[i, j]) for j in range(G.cols)]
+                            for i in range(G.rows)
+                        ]
+                        Gi = _SympyDomainMatrix(rows, G.shape, field).inv().to_Matrix()
+                        Gi_entries = [[Gi[i, j] for j in range(G.rows)] for i in range(G.rows)]
+                    except Exception:
+                        Gi_entries = None
+        # Floating inversion remains only as a fallback when the exact algebraic
+        # path is unavailable or intentionally skipped.
+        if Gi_entries is None and not getattr(self, "is_symbolic_d", False):
+            try:
+                prec = int(os.getenv("REPTHEORY_NUMERIC_PREC", "100"))
+            except Exception:
+                prec = 100
+            try:
+                Gf = G.evalf(prec)
+                Gi = Gf.inv()
+                Gi_entries = [[Gi[i, j] for j in range(G.rows)] for i in range(G.rows)]
+            except Exception:
+                Gi_entries = None
+        if Gi_entries is None and _sage_enabled():
             try:
                 Gi_entries = _sage_inverse_matrix_sympy(G, self.d)
             except Exception:
@@ -756,6 +809,7 @@ class DiagramAlgebra(ABC):
         # IMPORTANT: do NOT compute rho(a) from `label_of(a)` alone.
         # The BFS labels ignore the scalar factor d^(#loops) that arises when composing
         # diagrams; omitting it corrupts rho(a) and therefore the matrix units.
+        simplify = sympy.simplify if getattr(self, "is_symbolic_d", False) else (lambda x: x)
         basis = self.basis
         basis_words = self._basis_words_with_loop_powers()
         dual = self.dual_basis
@@ -767,7 +821,7 @@ class DiagramAlgebra(ABC):
                 M = self.irrep_matrix_for_label(ir_idx, word)
                 # The BFS word represents (coeff) * (basis diagram).
                 # So rho(basis diagram) = rho(word) / coeff.
-                rho_basis.append(sympy.simplify(M / coeff))
+                rho_basis.append(simplify(M / coeff))
             irrep_units = [dict() for _ in range(d_rho * d_rho)]
             for a_idx, coeffs in enumerate(dual):
                 rho_a_star = sympy.zeros(d_rho, d_rho)
@@ -800,7 +854,8 @@ class DiagramAlgebra(ABC):
         words = [None for _ in range(self.dim)]
         # Invariant: (word product) = coeffs[idx] * b_idx (scaled computational basis).
         # For the empty word, word product is the identity diagram = (1/s_id) * b_id.
-        coeffs[start_idx] = sympy.simplify(sympy.S.One / self._basis_scale(start_idx))
+        simplify = sympy.simplify if getattr(self, "is_symbolic_d", False) else (lambda x: x)
+        coeffs[start_idx] = simplify(sympy.S.One / self._basis_scale(start_idx))
         words[start_idx] = "1"
 
         q = deque([start])
@@ -819,7 +874,7 @@ class DiagramAlgebra(ABC):
                 #             = cur_coeff * s_cur * (diagram_cur * gen)
                 #             = cur_coeff * s_cur * d^loops * diagram_res
                 #             = cur_coeff * s_cur * d^loops / s_res * b_res
-                next_coeff = sympy.simplify(
+                next_coeff = simplify(
                     cur_coeff
                     * self._basis_scale(cur_idx)
                     * (self.d ** loops)
