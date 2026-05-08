@@ -1,6 +1,8 @@
 # Companion Code for "Efficient Quantum Fourier Transforms for Semisimple Algebras"
 
-This repository contains companion code for the paper "Efficient Quantum Fourier Transforms for Semisimple Algebras" by Ben Foxman, Barak Nehoran, and Yongshan Ding. The arXiv version of this paper is forthcoming; see `benfoxman.github.io` for a PDF version.
+This repository contains companion code for the paper [*Efficient Quantum Fourier Transforms for Semisimple Algebras*](https://arxiv.org/abs/2605.05337) by Ben Foxman, Barak Nehoran, and Yongshan Ding.
+
+If you use this code or find it useful in your research, please cite the accompanying paper. 
 
 The code provides a desktop GUI for exploring several diagram algebras:
 
